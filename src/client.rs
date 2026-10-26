@@ -47,6 +47,9 @@ const SHREDDIT_MAX_REDIRECTS: usize = 3;
 
 pub static CLIENT: LazyLock<WreqClient> = LazyLock::new(build_client);
 
+// Shreddit serves mobile browsers 10 comments per fragment instead of 25.
+static SHREDDIT_CLIENT: LazyLock<WreqClient> = LazyLock::new(|| build_emulated_client(&[Platform::Windows]));
+
 pub static OAUTH_CLIENT: LazyLock<ArcSwap<Oauth>> = LazyLock::new(|| {
 	let client = block_on(Oauth::new());
 	tokio::spawn(token_daemon());
@@ -89,11 +92,14 @@ impl Resolve for RedditDnsResolver {
 }
 
 pub fn build_client() -> WreqClient {
+	build_emulated_client(&[Platform::Android, Platform::Windows])
+}
+
+fn build_emulated_client(emulation_platform: &[Platform]) -> WreqClient {
 	// Keeping this list short to aid in privacy.
 	// The more emulations, the more unique a fingerprint each instance has.
 	// But some emulations should increase evasiveness.
 	let emulation = [Profile::Chrome145, Profile::Firefox147];
-	let emulation_platform = [Platform::Android, Platform::Windows];
 
 	let rand = fastrand::usize(..);
 	let emulation = Emulation::builder()
@@ -304,11 +310,17 @@ async fn shreddit_send(path: &str, cursor: Option<&str>) -> Result<WreqResponse,
 	let url = format!("{ALTERNATIVE_REDDIT_URL_BASE}{path}");
 
 	let builder = match cursor {
-		Some(cursor) => CLIENT
+		// Reddit's edge blocks POSTs that lack the Origin and Referer a browser sends.
+		Some(cursor) => SHREDDIT_CLIENT
 			.post(&url)
 			.header(wreq_header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+			.header(wreq_header::ORIGIN, ALTERNATIVE_REDDIT_URL_BASE)
+			.header(wreq_header::REFERER, format!("{ALTERNATIVE_REDDIT_URL_BASE}/"))
+			.header("sec-fetch-site", "same-origin")
+			.header("sec-fetch-mode", "cors")
+			.header("sec-fetch-dest", "empty")
 			.body(url::form_urlencoded::Serializer::new(String::new()).append_pair("cursor", cursor).finish()),
-		None => CLIENT.get(&url),
+		None => SHREDDIT_CLIENT.get(&url),
 	};
 
 	builder
