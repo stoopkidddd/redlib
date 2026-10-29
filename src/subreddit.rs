@@ -1,15 +1,20 @@
-use crate::{config, utils};
-// CRATES
+#![allow(clippy::cmp_owned)]
+
 use crate::utils::{
-	catch_random, error, filter_posts, format_num, format_url, get_filters, nsfw_landing, param, redirect, rewrite_urls, setting, template, val, Post, Preferences, Subreddit,
+	catch_random, error, filter_posts, format_num, format_url, get_filters, info, nsfw_landing, param, redirect, rewrite_urls, setting, template, to_absolute_url, val, Post,
+	Preferences, Subreddit,
 };
-use crate::{client::json, server::ResponseExt, RequestExt};
+use crate::{client::json, server::RequestExt, server::ResponseExt};
+use crate::{config, utils};
 use askama::Template;
 use cookie::Cookie;
+use htmlescape::decode_html;
 use hyper::{Body, Request, Response};
 
-use once_cell::sync::Lazy;
+use chrono::DateTime;
 use regex::Regex;
+use rss::{ChannelBuilder, Enclosure, Item};
+use std::sync::LazyLock;
 use time::{Duration, OffsetDateTime};
 
 // STRUCTS
@@ -53,7 +58,7 @@ struct WallTemplate {
 	url: String,
 }
 
-static GEO_FILTER_MATCH: Lazy<Regex> = Lazy::new(|| Regex::new(r"geo_filter=(?<region>\w+)").unwrap());
+static GEO_FILTER_MATCH: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"geo_filter=(?<region>\w+)").unwrap());
 
 // SERVICES
 pub async fn community(req: Request<Body>) -> Result<Response<Body>, String> {
@@ -62,6 +67,7 @@ pub async fn community(req: Request<Body>) -> Result<Response<Body>, String> {
 	let query = req.uri().query().unwrap_or_default().to_string();
 	let subscribed = setting(&req, "subscriptions");
 	let front_page = setting(&req, "front_page");
+	let remove_default_feeds = setting(&req, "remove_default_feeds") == "on";
 	let post_sort = req.cookie("post_sort").map_or_else(|| "hot".to_string(), |c| c.value().to_string());
 	let sort = req.param("sort").unwrap_or_else(|| req.param("id").unwrap_or(post_sort));
 
@@ -74,6 +80,21 @@ pub async fn community(req: Request<Body>) -> Result<Response<Body>, String> {
 	} else {
 		front_page.clone()
 	});
+
+	if (sub_name == "popular" || sub_name == "all") && remove_default_feeds {
+		if subscribed.is_empty() {
+			return info(req, "Subscribe to some subreddits! (Default feeds disabled in settings)").await;
+		} else {
+			// If there are subscribed subs, but we get here, then the problem is that front_page pref is set to something besides default.
+			// Tell user to go to settings and change front page to default.
+			return info(
+				req,
+				"You have subscribed to some subreddits, but your front page is not set to default. Visit settings and change front page to default.",
+			)
+			.await;
+		}
+	}
+
 	let quarantined = can_access_quarantine(&req, &sub_name) || root;
 
 	// Handle random subreddits
@@ -147,8 +168,8 @@ pub async fn community(req: Request<Body>) -> Result<Response<Body>, String> {
 				let no_posts = posts.is_empty();
 				let all_posts_hidden_nsfw = !no_posts && (posts.iter().all(|p| p.flags.nsfw) && setting(&req, "show_nsfw") != "on");
 				if sort == "new" {
-					posts.sort_by(|a, b| b.created_ts.cmp(&a.created_ts));
-					posts.sort_by(|a, b| b.flags.stickied.cmp(&a.flags.stickied));
+					posts.sort_by_key(|post| std::cmp::Reverse(post.created_ts));
+					posts.sort_by_key(|post| std::cmp::Reverse(post.flags.stickied));
 				}
 				Ok(template(&SubredditTemplate {
 					sub,
@@ -207,6 +228,41 @@ pub async fn add_quarantine_exception(req: Request<Body>) -> Result<Response<Bod
 pub fn can_access_quarantine(req: &Request<Body>, sub: &str) -> bool {
 	// Determine if the subreddit can be accessed
 	setting(req, &format!("allow_quaran_{}", sub.to_lowercase())).parse().unwrap_or_default()
+}
+
+// Join items in chunks of 4000 bytes in length for cookies
+pub fn join_until_size_limit<T: std::fmt::Display>(vec: &[T]) -> Vec<std::string::String> {
+	let mut result = Vec::new();
+	let mut list = String::new();
+	let mut current_size = 0;
+
+	for item in vec {
+		// Size in bytes
+		let item_size = item.to_string().len();
+		// Use 4000 bytes to leave us some headroom because the name and options of the cookie count towards the 4096 byte cap
+		if current_size + item_size > 4000 {
+			// If last item add a seperator on the end of the list so it's interpreted properly in tanden with the next cookie
+			list.push('+');
+
+			// Push current list to result vector
+			result.push(list);
+
+			// Reset the list variable so we can continue with only new items
+			list = String::new();
+		}
+		// Add separator if not the first item
+		if !list.is_empty() {
+			list.push('+');
+		}
+		// Add current item to list
+		list.push_str(&item.to_string());
+		current_size = list.len() + item_size;
+	}
+	// Make sure to push whatever the remaining subreddits are there into the result vector
+	result.push(list);
+
+	// Return resulting vector
+	result
 }
 
 // Sub, filter, unfilter, or unsub by setting subscription cookie using response "Set-Cookie" header
@@ -301,28 +357,101 @@ pub async fn subscriptions_filters(req: Request<Body>) -> Result<Response<Body>,
 
 	let mut response = redirect(&path);
 
-	// Delete cookie if empty, else set
+	// If sub_list is empty remove all subscriptions cookies, otherwise update them and remove old ones
 	if sub_list.is_empty() {
+		// Remove subscriptions cookie
 		response.remove_cookie("subscriptions".to_string());
+
+		// Start with first numbered subscriptions cookie
+		let mut subscriptions_number = 1;
+
+		// While whatever subscriptionsNUMBER cookie we're looking at has a value
+		while req.cookie(&format!("subscriptions{subscriptions_number}")).is_some() {
+			// Remove that subscriptions cookie
+			response.remove_cookie(format!("subscriptions{subscriptions_number}"));
+
+			// Increment subscriptions cookie number
+			subscriptions_number += 1;
+		}
 	} else {
-		response.insert_cookie(
-			Cookie::build(("subscriptions", sub_list.join("+")))
-				.path("/")
-				.http_only(true)
-				.expires(OffsetDateTime::now_utc() + Duration::weeks(52))
-				.into(),
-		);
+		// Start at 0 to keep track of what number we need to start deleting old subscription cookies from
+		let mut subscriptions_number_to_delete_from = 0;
+
+		// Starting at 0 so we handle the subscription cookie without a number first
+		for (subscriptions_number, list) in join_until_size_limit(&sub_list).into_iter().enumerate() {
+			let subscriptions_cookie = if subscriptions_number == 0 {
+				"subscriptions".to_string()
+			} else {
+				format!("subscriptions{subscriptions_number}")
+			};
+
+			response.insert_cookie(
+				Cookie::build((subscriptions_cookie, list))
+					.path("/")
+					.http_only(true)
+					.expires(OffsetDateTime::now_utc() + Duration::weeks(52))
+					.into(),
+			);
+
+			subscriptions_number_to_delete_from += 1;
+		}
+
+		// While whatever subscriptionsNUMBER cookie we're looking at has a value
+		while req.cookie(&format!("subscriptions{subscriptions_number_to_delete_from}")).is_some() {
+			// Remove that subscriptions cookie
+			response.remove_cookie(format!("subscriptions{subscriptions_number_to_delete_from}"));
+
+			// Increment subscriptions cookie number
+			subscriptions_number_to_delete_from += 1;
+		}
 	}
+
+	// If filters is empty remove all filters cookies, otherwise update them and remove old ones
 	if filters.is_empty() {
+		// Remove filters cookie
 		response.remove_cookie("filters".to_string());
+
+		// Start with first numbered filters cookie
+		let mut filters_number = 1;
+
+		// While whatever filtersNUMBER cookie we're looking at has a value
+		while req.cookie(&format!("filters{filters_number}")).is_some() {
+			// Remove that filters cookie
+			response.remove_cookie(format!("filters{filters_number}"));
+
+			// Increment filters cookie number
+			filters_number += 1;
+		}
 	} else {
-		response.insert_cookie(
-			Cookie::build(("filters", filters.join("+")))
-				.path("/")
-				.http_only(true)
-				.expires(OffsetDateTime::now_utc() + Duration::weeks(52))
-				.into(),
-		);
+		// Start at 0 to keep track of what number we need to start deleting old filters cookies from
+		let mut filters_number_to_delete_from = 0;
+
+		for (filters_number, list) in join_until_size_limit(&filters).into_iter().enumerate() {
+			let filters_cookie = if filters_number == 0 {
+				"filters".to_string()
+			} else {
+				format!("filters{filters_number}")
+			};
+
+			response.insert_cookie(
+				Cookie::build((filters_cookie, list))
+					.path("/")
+					.http_only(true)
+					.expires(OffsetDateTime::now_utc() + Duration::weeks(52))
+					.into(),
+			);
+
+			filters_number_to_delete_from += 1;
+		}
+
+		// While whatever filtersNUMBER cookie we're looking at has a value
+		while req.cookie(&format!("filters{filters_number_to_delete_from}")).is_some() {
+			// Remove that filters cookie
+			response.remove_cookie(format!("filters{filters_number_to_delete_from}"));
+
+			// Increment filters cookie number
+			filters_number_to_delete_from += 1;
+		}
 	}
 
 	Ok(response)
@@ -466,15 +595,20 @@ pub async fn rss(req: Request<Body>) -> Result<Response<Body>, String> {
 	}
 
 	use hyper::header::CONTENT_TYPE;
-	use rss::{ChannelBuilder, Item};
 
 	// Get subreddit
 	let sub = req.param("sub").unwrap_or_default();
-	let post_sort = req.cookie("post_sort").map_or_else(|| "hot".to_string(), |c| c.value().to_string());
-	let sort = req.param("sort").unwrap_or_else(|| req.param("id").unwrap_or(post_sort));
+	let query = format!("?{}", req.uri().query().unwrap_or_default());
+	let sort = match param(&query, "sort").as_deref() {
+		Some(s @ ("hot" | "new" | "top" | "rising" | "controversial")) => s.to_string(),
+		_ => "hot".to_string(),
+	};
 
 	// Get path
 	let path = format!("/r/{sub}/{sort}.json?{}", req.uri().query().unwrap_or_default());
+
+	// Get subreddit link
+	let subreddit_link: String = format!("{}/r/{sub}", config::get_setting("REDLIB_FULL_URL").unwrap_or_default());
 
 	// Get subreddit data
 	let subreddit = subreddit(&sub, false).await?;
@@ -486,15 +620,23 @@ pub async fn rss(req: Request<Body>) -> Result<Response<Body>, String> {
 	let channel = ChannelBuilder::default()
 		.title(&subreddit.title)
 		.description(&subreddit.description)
+		.link(&subreddit_link)
 		.items(
 			posts
 				.into_iter()
-				.map(|post| Item {
-					title: Some(post.title.to_string()),
-					link: Some(utils::get_post_url(&post)),
-					author: Some(post.author.name),
-					content: Some(rewrite_urls(&post.body)),
-					..Default::default()
+				.map(|post| {
+					let mut item = Item {
+						title: Some(post.title.to_string()),
+						link: Some(format_url(&utils::get_post_url(&post))),
+						author: Some(post.author.name.to_string()),
+						content: Some(rewrite_urls(&decode_html(&post.body).unwrap())),
+						pub_date: Some(DateTime::from_timestamp(post.created_ts as i64, 0).unwrap_or_default().to_rfc2822()),
+						description: Some(format!("<a href='{}'>Comments</a>", to_absolute_url(&post.permalink))),
+						..Default::default()
+					};
+
+					apply_enclosure(&mut item, &post);
+					item
 				})
 				.collect::<Vec<_>>(),
 		)
@@ -510,16 +652,74 @@ pub async fn rss(req: Request<Body>) -> Result<Response<Body>, String> {
 	Ok(res)
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_fetching_subreddit() {
-	let subreddit = subreddit("rust", false).await;
-	assert!(subreddit.is_ok());
+// Set enclosure image for RSS feed item
+fn apply_enclosure(item: &mut Item, post: &Post) {
+	item.set_enclosure(get_rss_image(post));
+
+	// Embed the number of gallery images in description and content since
+	// only the first image in the gallery is used for the enclosure
+	if post.post_type == "gallery" && post.gallery.len() > 1 {
+		item.set_description(format!("<a href='{}'>Gallery with {} images</a>", to_absolute_url(&post.permalink), post.gallery.len()));
+
+		if let Some(content) = item.content() {
+			let new_content = format!("{}<br/>{}", item.description().unwrap_or(""), content,);
+			item.set_content(new_content);
+		}
+	}
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_gated_and_quarantined() {
-	let quarantined = subreddit("edgy", true).await;
-	assert!(quarantined.is_ok());
-	let gated = subreddit("drugs", true).await;
-	assert!(gated.is_ok());
+fn get_rss_image(post: &Post) -> Option<Enclosure> {
+	let image_url = match post.post_type.as_str() {
+		"image" => Some(post.media.url.clone()),
+		"gallery" => post.gallery.first().and_then(|media| decode_html(&media.url).ok()),
+		"gif" | "video" => decode_html(&post.media.poster).ok(),
+		_ => None,
+	};
+
+	image_url.map(|url| {
+		let mut enclosure = Enclosure::default();
+		enclosure.set_mime_type(get_mime_type(&url));
+		enclosure.set_url(to_absolute_url(&url));
+		enclosure.set_length("0");
+		enclosure
+	})
+}
+
+/// Determines the MIME type based on file extension in a URL.
+/// Handles both absolute and relative URLs with query parameters.
+fn get_mime_type(url: &str) -> &'static str {
+	// Extract the path component, removing query parameters
+	let path = url.split('?').next().unwrap_or(url);
+
+	// Get the file extension (everything after the last dot)
+	let extension = path.rsplit('.').next().unwrap_or("").to_lowercase();
+
+	// Match common image extensions
+	match extension.as_str() {
+		"jpg" | "jpeg" => "image/jpeg",
+		"png" => "image/png",
+		"gif" => "image/gif",
+		"webp" => "image/webp",
+		"svg" => "image/svg+xml",
+		_ => "application/octet-stream",
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn test_fetching_subreddit() {
+		let subreddit = subreddit("rust", false).await;
+		assert!(subreddit.is_ok());
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn test_gated_and_quarantined() {
+		let quarantined = subreddit("edgy", true).await;
+		assert!(quarantined.is_ok());
+		let gated = subreddit("drugs", true).await;
+		assert!(gated.is_ok());
+	}
 }

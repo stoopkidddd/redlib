@@ -1,9 +1,11 @@
-// CRATES
+#![allow(clippy::cmp_owned)]
 use crate::client::json;
 use crate::server::RequestExt;
 use crate::utils::{error, filter_posts, format_url, get_filters, nsfw_landing, param, setting, template, Post, Preferences, User};
 use crate::{config, utils};
 use askama::Template;
+use chrono::DateTime;
+use htmlescape::decode_html;
 use hyper::{Body, Request, Response};
 use time::{macros::format_description, OffsetDateTime};
 
@@ -54,7 +56,7 @@ pub async fn profile(req: Request<Body>) -> Result<Response<Body>, String> {
 	// Return landing page if this post if this Reddit deems this user NSFW,
 	// but we have also disabled the display of NSFW content or if the instance
 	// is SFW-only.
-	if user.nsfw && crate::utils::should_be_nsfw_gated(&req, &req_url) {
+	if user.nsfw && utils::should_be_nsfw_gated(&req, &req_url) {
 		return Ok(nsfw_landing(req, req_url).await.unwrap_or_default());
 	}
 
@@ -161,9 +163,10 @@ pub async fn rss(req: Request<Body>) -> Result<Response<Body>, String> {
 				.into_iter()
 				.map(|post| Item {
 					title: Some(post.title.to_string()),
-					link: Some(utils::get_post_url(&post)),
+					link: Some(format_url(&utils::get_post_url(&post))),
 					author: Some(post.author.name),
-					content: Some(rewrite_urls(&post.body)),
+					pub_date: Some(DateTime::from_timestamp(post.created_ts as i64, 0).unwrap_or_default().to_rfc2822()),
+					content: Some(rewrite_urls(&decode_html(&post.body).unwrap_or_else(|_| post.body.clone()))),
 					..Default::default()
 				})
 				.collect::<Vec<_>>(),
@@ -180,9 +183,14 @@ pub async fn rss(req: Request<Body>) -> Result<Response<Body>, String> {
 	Ok(res)
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_fetching_user() {
-	let user = user("spez").await;
-	assert!(user.is_ok());
-	assert!(user.unwrap().karma > 100);
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn test_fetching_user() {
+		let user = user("spez").await;
+		assert!(user.is_ok());
+		assert!(user.unwrap().karma > 100);
+	}
 }

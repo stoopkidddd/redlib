@@ -43,8 +43,10 @@
 		<div id="feed_list">
 			<p>MAIN FEEDS</p>
 			<a href="/">Home</a>
-			<a href="/r/popular">Popular</a>
-			<a href="/r/all">All</a>
+			{% if prefs.remove_default_feeds != "on" %}
+				<a href="/r/popular">Popular</a>
+				<a href="/r/all">All</a>
+			{% endif %}
 			{% if prefs.subscriptions.len() > 0 %}
 				<p>REDDIT FEEDS</p>
 				{% for sub in prefs.subscriptions %}
@@ -153,7 +155,10 @@
 	{% endif %}
 
 	<!-- POST BODY -->
-	<div class="post_body">{{ post.body|safe }}</div>
+	<div class="post_body">
+		{{ post.body|safe }}
+		{% call poll(post) %}
+	</div>
 	<div class="post_score" title="{{ post.score.1 }}">
     {% if prefs.hide_score != "on" %}
     {{ post.score.0 }}

@@ -6,14 +6,14 @@ use crate::{
 use askama::Template;
 use build_html::{Container, Html, HtmlContainer, Table};
 use hyper::{http::Error, Body, Request, Response};
-use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
 use time::OffsetDateTime;
 
-// This is the local static that is intialized at runtime (technically at
-// the first request to the info endpoint) and contains the data
-// retrieved from the info endpoint.
-pub static INSTANCE_INFO: Lazy<InstanceInfo> = Lazy::new(InstanceInfo::new);
+/// This is the local static that is initialized at runtime (technically at
+/// the first request to the info endpoint) and contains the data
+/// retrieved from the info endpoint.
+pub static INSTANCE_INFO: LazyLock<InstanceInfo> = LazyLock::new(InstanceInfo::new);
 
 /// Handles instance info endpoint
 pub async fn instance_info(req: Request<Body>) -> Result<Response<Body>, String> {
@@ -85,7 +85,7 @@ fn info_html(req: &Request<Body>) -> Result<Response<Body>, Error> {
 pub struct InstanceInfo {
 	package_name: String,
 	crate_version: String,
-	git_commit: String,
+	pub git_commit: String,
 	deploy_date: String,
 	compile_mode: String,
 	deploy_unix_ts: i64,
@@ -128,6 +128,7 @@ impl InstanceInfo {
 				["Pushshift frontend", &convert(&self.config.pushshift)],
 				["RSS enabled", &convert(&self.config.enable_rss)],
 				["Full URL", &convert(&self.config.full_url)],
+				["Remove default feeds", &convert(&self.config.default_remove_default_feeds)],
 				//TODO: fallback to crate::config::DEFAULT_PUSHSHIFT_FRONTEND
 			])
 			.with_header_row(["Settings"]),
@@ -169,6 +170,7 @@ impl InstanceInfo {
 				Pushshift frontend: {:?}\n
 				RSS enabled: {:?}\n
 				Full URL: {:?}\n
+				Remove default feeds: {:?}\n
                 Config:\n
                     Banner: {:?}\n
                     Hide awards: {:?}\n
@@ -195,6 +197,7 @@ impl InstanceInfo {
 					self.config.sfw_only,
 					self.config.enable_rss,
 					self.config.full_url,
+					self.config.default_remove_default_feeds,
 					self.config.pushshift,
 					self.config.banner,
 					self.config.default_hide_awards,

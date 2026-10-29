@@ -2,35 +2,19 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::cmp_owned)]
 
-// Reference local files
-mod config;
-mod duplicates;
-mod instance_info;
-mod oauth;
-mod oauth_resources;
-mod post;
-mod search;
-mod settings;
-mod subreddit;
-mod user;
-mod utils;
-
-// Import Crates
+use cached::proc_macro::cached;
 use clap::{Arg, ArgAction, Command};
+use std::sync::LazyLock;
 
 use futures_lite::FutureExt;
 use hyper::{header::HeaderValue, Body, Request, Response};
+use log::{info, warn};
+use redlib::client::{canonical_path, proxy, rate_limit_check, CLIENT};
+use redlib::server::{self, RequestExt};
+use redlib::utils::{error, redirect, ThemeAssets};
+use redlib::{config, duplicates, headers, instance_info, post, search, settings, subreddit, user};
 
-mod client;
-use client::{canonical_path, proxy};
-use log::info;
-use once_cell::sync::Lazy;
-use server::RequestExt;
-use utils::{error, redirect, ThemeAssets};
-
-use crate::client::OAUTH_CLIENT;
-
-mod server;
+use redlib::client::OAUTH_CLIENT;
 
 // Create Services
 
@@ -74,6 +58,17 @@ async fn font() -> Result<Response<Body>, String> {
 			.header("content-type", "font/woff2")
 			.header("Cache-Control", "public, max-age=1209600, s-maxage=86400")
 			.body(include_bytes!("../static/Inter.var.woff2").as_ref().into())
+			.unwrap_or_default(),
+	)
+}
+
+async fn opensearch() -> Result<Response<Body>, String> {
+	Ok(
+		Response::builder()
+			.status(200)
+			.header("content-type", "application/opensearchdescription+xml")
+			.header("Cache-Control", "public, max-age=1209600, s-maxage=86400")
+			.body(include_bytes!("../static/opensearch.xml").as_ref().into())
 			.unwrap_or_default(),
 	)
 }
@@ -122,6 +117,8 @@ async fn main() {
 	let matches = Command::new("Redlib")
 		.version(env!("CARGO_PKG_VERSION"))
 		.about("Private front-end for Reddit written in Rust ")
+		.arg(Arg::new("ipv4-only").short('4').long("ipv4-only").help("Listen on IPv4 only").num_args(0))
+		.arg(Arg::new("ipv6-only").short('6').long("ipv6-only").help("Listen on IPv6 only").num_args(0))
 		.arg(
 			Arg::new("redirect-https")
 				.short('r')
@@ -160,11 +157,34 @@ async fn main() {
 		)
 		.get_matches();
 
+	match rate_limit_check().await {
+		Ok(()) => {
+			info!("[✅] Rate limit check passed");
+		}
+		Err(e) => {
+			let mut message = format!("Rate limit check failed: {e}");
+			message += "\nThis may cause issues with the rate limit.";
+			message += "\nPlease report this error with the above information.";
+			message += "\nhttps://github.com/redlib-org/redlib/issues/new?assignees=sigaloid&labels=bug&title=%F0%9F%90%9B+Bug+Report%3A+Rate+limit+mismatch";
+			warn!("{}", message);
+			eprintln!("{message}");
+		}
+	}
+
 	let address = matches.get_one::<String>("address").unwrap();
 	let port = matches.get_one::<String>("port").unwrap();
 	let hsts = matches.get_one("hsts").map(|m: &String| m.as_str());
 
-	let listener = [address, ":", port].concat();
+	let ipv4_only = std::env::var("IPV4_ONLY").is_ok() || matches.get_flag("ipv4-only");
+	let ipv6_only = std::env::var("IPV6_ONLY").is_ok() || matches.get_flag("ipv6-only");
+
+	let listener = if ipv4_only {
+		format!("0.0.0.0:{port}")
+	} else if ipv6_only {
+		format!("[::]:{port}")
+	} else {
+		[address, ":", port].concat()
+	};
 
 	println!("Starting Redlib...");
 
@@ -178,11 +198,11 @@ async fn main() {
 	// at first request
 
 	info!("Evaluating config.");
-	Lazy::force(&config::CONFIG);
+	LazyLock::force(&config::CONFIG);
 	info!("Evaluating instance info.");
-	Lazy::force(&instance_info::INSTANCE_INFO);
+	LazyLock::force(&instance_info::INSTANCE_INFO);
 	info!("Creating OAUTH client.");
-	Lazy::force(&OAUTH_CLIENT);
+	LazyLock::force(&OAUTH_CLIENT);
 
 	// Define default headers (added to all responses)
 	app.default_headers = headers! {
@@ -223,6 +243,7 @@ async fn main() {
 	app.at("/Inter.var.woff2").get(|_| font().boxed());
 	app.at("/touch-icon-iphone.png").get(|_| iphone_logo().boxed());
 	app.at("/apple-touch-icon.png").get(|_| iphone_logo().boxed());
+	app.at("/opensearch.xml").get(|_| opensearch().boxed());
 	app
 		.at("/playHLSVideo.js")
 		.get(|_| resource(include_str!("../static/playHLSVideo.js"), "text/javascript", false).boxed());
@@ -232,6 +253,13 @@ async fn main() {
 	app
 		.at("/highlighted.js")
 		.get(|_| resource(include_str!("../static/highlighted.js"), "text/javascript", false).boxed());
+	app
+		.at("/check_update.js")
+		.get(|_| resource(include_str!("../static/check_update.js"), "text/javascript", false).boxed());
+	app.at("/copy.js").get(|_| resource(include_str!("../static/copy.js"), "text/javascript", false).boxed());
+
+	app.at("/commits.atom").get(|_| async move { proxy_commit_info().await }.boxed());
+	app.at("/instances.json").get(|_| async move { proxy_instances().await }.boxed());
 
 	// Proxy media through Redlib
 	app.at("/vid/:id/:size").get(|r| proxy(r, "https://v.redd.it/{id}/DASH_{size}").boxed());
@@ -239,6 +267,9 @@ async fn main() {
 	app.at("/img/*path").get(|r| proxy(r, "https://i.redd.it/{path}").boxed());
 	app.at("/thumb/:point/:id").get(|r| proxy(r, "https://{point}.thumbs.redditmedia.com/{id}").boxed());
 	app.at("/emoji/:id/:name").get(|r| proxy(r, "https://emoji.redditmedia.com/{id}/{name}").boxed());
+	app
+		.at("/emote/:subreddit_id/:filename")
+		.get(|r| proxy(r, "https://reddit-econ-prod-assets-permanent.s3.amazonaws.com/asset-manager/{subreddit_id}/{filename}").boxed());
 	app
 		.at("/preview/:loc/award_images/:fullname/:id")
 		.get(|r| proxy(r, "https://{loc}view.redd.it/award_images/{fullname}/{id}").boxed());
@@ -264,6 +295,7 @@ async fn main() {
 	// Configure settings
 	app.at("/settings").get(|r| settings::get(r).boxed()).post(|r| settings::set(r).boxed());
 	app.at("/settings/restore").get(|r| settings::restore(r).boxed());
+	app.at("/settings/encoded-restore").post(|r| settings::encoded_restore(r).boxed());
 	app.at("/settings/update").get(|r| settings::update(r).boxed());
 
 	// RSS Subscriptions
@@ -341,7 +373,7 @@ async fn main() {
 			let sub = req.param("sub").unwrap_or_default();
 			match req.param("id").as_deref() {
 				// Share link
-				Some(id) if (8..12).contains(&id.len()) => match canonical_path(format!("/r/{sub}/s/{id}")).await {
+				Some(id) if (8..12).contains(&id.len()) => match canonical_path(format!("/r/{sub}/s/{id}"), 3).await {
 					Ok(Some(path)) => Ok(redirect(&path)),
 					Ok(None) => error(req, "Post ID is invalid. It may point to a post on a community that has been banned.").await,
 					Err(e) => error(req, &e).await,
@@ -360,7 +392,7 @@ async fn main() {
 				Some("best" | "hot" | "new" | "top" | "rising" | "controversial") => subreddit::community(req).await,
 
 				// Short link for post
-				Some(id) if (5..8).contains(&id.len()) => match canonical_path(format!("/{id}")).await {
+				Some(id) if (5..8).contains(&id.len()) => match canonical_path(format!("/comments/{id}"), 3).await {
 					Ok(path_opt) => match path_opt {
 						Some(path) => Ok(redirect(&path)),
 						None => error(req, "Post ID is invalid. It may point to a post on a community that has been banned.").await,
@@ -385,4 +417,38 @@ async fn main() {
 	if let Err(e) = server.await {
 		eprintln!("Server error: {e}");
 	}
+}
+
+pub async fn proxy_commit_info() -> Result<Response<Body>, String> {
+	Ok(
+		Response::builder()
+			.status(200)
+			.header("content-type", "application/atom+xml")
+			.body(Body::from(fetch_commit_info().await))
+			.unwrap_or_default(),
+	)
+}
+
+#[cached(time = 600)]
+async fn fetch_commit_info() -> String {
+	let url = "https://github.com/redlib-org/redlib/commits/main.atom";
+
+	CLIENT.get(url).send().await.expect("Failed to request GitHub").text().await.expect("Failed to read body")
+}
+
+pub async fn proxy_instances() -> Result<Response<Body>, String> {
+	Ok(
+		Response::builder()
+			.status(200)
+			.header("content-type", "application/json")
+			.body(Body::from(fetch_instances().await))
+			.unwrap_or_default(),
+	)
+}
+
+#[cached(time = 600)]
+async fn fetch_instances() -> String {
+	let url = "https://raw.githubusercontent.com/redlib-org/redlib-instances/refs/heads/main/instances.json";
+
+	CLIENT.get(url).send().await.expect("Failed to request GitHub").text().await.expect("Failed to read body")
 }

@@ -1,17 +1,16 @@
-// CRATES
+#![allow(clippy::cmp_owned)]
 use crate::client::json;
 use crate::config::get_setting;
 use crate::server::RequestExt;
 use crate::subreddit::{can_access_quarantine, quarantine};
 use crate::utils::{
-	error, format_num, get_filters, nsfw_landing, param, parse_post, rewrite_urls, setting, template, time, val, Author, Awards, Comment, Flair, FlairPart, Post, Preferences,
+	error, format_num, get_filters, nsfw_landing, param, parse_post, rewrite_emotes, setting, template, time, val, Author, Awards, Comment, Flair, FlairPart, Post, Preferences,
 };
-use hyper::{Body, Request, Response};
-
 use askama::Template;
-use once_cell::sync::Lazy;
+use hyper::{Body, Request, Response};
 use regex::Regex;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
 
 // STRUCTS
 #[derive(Template)]
@@ -27,7 +26,7 @@ struct PostTemplate {
 	comment_query: String,
 }
 
-static COMMENT_SEARCH_CAPTURE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\?q=(.*)&type=comment").unwrap());
+static COMMENT_SEARCH_CAPTURE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\?q=(.*)&type=comment").unwrap());
 
 pub async fn item(req: Request<Body>) -> Result<Response<Body>, String> {
 	// Build Reddit API path
@@ -72,10 +71,14 @@ pub async fn item(req: Request<Body>) -> Result<Response<Body>, String> {
 				return Ok(nsfw_landing(req, req_url).await.unwrap_or_default());
 			}
 
-			let query = match COMMENT_SEARCH_CAPTURE.captures(&url) {
+			let query_body = match COMMENT_SEARCH_CAPTURE.captures(&url) {
 				Some(captures) => captures.get(1).unwrap().as_str().replace("%20", " ").replace('+', " "),
 				None => String::new(),
 			};
+
+			let query_string = format!("q={query_body}&type=comment");
+			let form = url::form_urlencoded::parse(query_string.as_bytes()).collect::<HashMap<_, _>>();
+			let query = form.get("q").unwrap().clone().to_string();
 
 			let comments = match query.as_str() {
 				"" => parse_comments(&response[1], &post.permalink, &post.author.name, highlighted_comment, &get_filters(&req), &req),
@@ -174,7 +177,7 @@ fn build_comment(
 			get_setting("REDLIB_PUSHSHIFT_FRONTEND").unwrap_or_else(|| String::from(crate::config::DEFAULT_PUSHSHIFT_FRONTEND)),
 		)
 	} else {
-		rewrite_urls(&val(comment, "body_html"))
+		rewrite_emotes(&data["media_metadata"], val(comment, "body_html"))
 	};
 	let kind = comment["kind"].as_str().unwrap_or_default().to_string();
 

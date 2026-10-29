@@ -2,11 +2,11 @@
 
 > An alternative private front-end to Reddit, with its origins in [Libreddit](https://github.com/libreddit/libreddit).
 
-![screenshot](https://i.ibb.co/QYbqTQt/libreddit-rust.png)
+![screenshot](https://i.ibb.co/18vrdxk/redlib-rust.png)
 
 ---
 
-**10-second pitch:** Redlib is a private front-end like [Invidious](https://github.com/iv-org/invidious) but for Reddit. Browse the coldest takes of [r/unpopularopinion](https://redlib.matthew.science/r/unpopularopinion) without being [tracked](#reddit).
+**10-second pitch:** Redlib is a private front-end like [Invidious](https://github.com/iv-org/invidious) but for Reddit. Browse the coldest takes of [r/unpopularopinion](https://farside.link/redlib/r/unpopularopinion) without being [tracked](#reddit).
 
 - 🚀 Fast: written in Rust for blazing-fast speeds and memory safety
 - ☁️ Light: no JavaScript, no ads, no tracking, no bloat
@@ -30,11 +30,13 @@
      - [Reddit](#reddit)
      - [Redlib](#redlib-1)
        - [Server](#server)
-       - [Official instance (redlib.matthew.science)](#official-instance-redlibmatthewscience)
 5. [Deployment](#deployment)
    - [Docker](#docker)
      - [Docker Compose](#docker-compose)
      - [Docker CLI](#docker-cli)
+   - Podman 
+      - Quadlets
+
    - [Binary](#binary)
      - [Running as a systemd service](#running-as-a-systemd-service)
    - [Building from source](#building-from-source)
@@ -72,7 +74,7 @@ Redlib currently implements most of Reddit's (signed-out) functionalities but st
 
 - [Rust](https://www.rust-lang.org/) - Programming language
 - [Hyper](https://github.com/hyperium/hyper) - HTTP server and client
-- [Askama](https://github.com/djc/askama) - Templating engine
+- [Askama](https://github.com/askama-rs/askama) - Templating engine
 - [Rustls](https://github.com/rustls/rustls) - TLS library
 
 ## How is it different from other Reddit front ends?
@@ -109,7 +111,7 @@ Last tested on January 12, 2024.
 Results from Google PageSpeed Insights ([Redlib Report](https://pagespeed.web.dev/report?url=https%3A%2F%2Fredlib.matthew.science%2F), [Reddit Report](https://pagespeed.web.dev/report?url=https://www.reddit.com)).
 
 | Performance metric  | Redlib   | Reddit    |
-| ------------------- | -------- | --------- |
+|---------------------|----------|-----------|
 | Speed Index         | 0.6s     | 1.9s      |
 | Performance Score   | 100%     | 64%       |
 | Time to Interactive | **2.8s** | **12.4s** |
@@ -156,17 +158,7 @@ For transparency, I hope to describe all the ways Redlib handles user privacy.
 
 - **Logging:** In production (when running the binary, hosting with docker, or using the official instances), Redlib logs nothing. When debugging (running from source without `--release`), Redlib logs post IDs fetched to aid with troubleshooting.
 
-- **Cookies:** Redlib uses optional cookies to store any configured settings in [the settings menu](https://redlib.matthew.science/settings). These are not cross-site cookies and the cookies hold no personal data.
-
-#### Official instance (redlib.matthew.science)
-
-The official instance is hosted at https://redlib.matthew.science.
-
-- **Server:** The official instance runs a production binary, and thus logs nothing.
-
-- **DNS:** The domain for the official instance uses Cloudflare as the DNS resolver. However, this site is not proxied through Cloudflare, and thus Cloudflare doesn't have access to user traffic.
-
-- **Hosting:** The official instance is hosted on [Replit](https://replit.com/), which monitors usage to prevent abuse. I can understand if this invalidates certain users' threat models, and therefore, self-hosting, using unofficial instances, and browsing through Tor are welcomed.
+- **Cookies:** Redlib uses optional cookies to store any configured settings in the settings menu. These are not cross-site cookies and the cookies hold no personal data.
 
 ---
 
@@ -180,7 +172,7 @@ For configuration options, see the [Configuration section](#Configuration).
 
 [Docker](https://www.docker.com) lets you run containerized applications. Containers are loosely isolated environments that are lightweight and contain everything needed to run the application, so there's no need to rely on what's installed on the host.
 
-Docker images for Redlib are available at [quay.io](https://quay.io/repository/redlib/redlib), with support for `amd64`, `arm64`, and `armv7` platforms.
+Container images for Redlib are available at [quay.io](https://quay.io/repository/redlib/redlib), with support for `amd64`, `arm64`, and `armv7` platforms.
 
 ### Docker Compose
 
@@ -224,6 +216,37 @@ Stream logs from the Redlib container:
 ```bash
 docker logs -f redlib
 ```
+## Podman 
+
+[Podman](https://podman.io/) lets you run containerized applications in a rootless fashion. Containers are loosely isolated environments that are lightweight and contain everything needed to run the application, so there's no need to rely on what's installed on the host.
+
+Container images for Redlib are available at [quay.io](https://quay.io/repository/redlib/redlib), with support for `amd64`, `arm64`, and `armv7` platforms.
+
+### Quadlets
+
+> [!IMPORTANT]
+> These instructions assume that you are on a systemd based distro with [podman](https://podman.io/). If not, follow these [instructions on podman's website](https://podman.io/docs/installation) for how to do so. 
+> It also assumes you have used `loginctl enable-linger <username>` to enable the service to start for your user without logging in. 
+
+Copy the `redlib.container` and `.env.example` files to `.config/containers/systemd/` and modify any relevant values (for example, the ports Redlib should listen on, renaming the .env file and editing its values, etc.).
+
+To start Redlib either reboot or follow the instructions below:
+
+Notify systemd of the new files
+```bash
+systemctl --user daemon-reload
+```
+
+Start the newly generated service file
+
+```bash
+systemctl --user start redlib.service
+```
+
+You can check the status of your container by using the following command:
+```bash 
+systemctl --user status redlib.service
+```
 
 ## Binary
 
@@ -232,7 +255,7 @@ If you're on Linux, you can grab a binary from [the newest release](https://gith
 Download the binary using [Wget](https://www.gnu.org/software/wget/):
 
 ```bash
-wget https://github.com/redlib-org/redlib/releases/download/v0.31.0/redlib
+wget https://github.com/redlib-org/redlib/releases/download/v0.40.0/redlib
 ```
 
 Make the binary executable and change its ownership to `root`:
@@ -370,40 +393,93 @@ REDLIB_DEFAULT_USE_HLS = "on"
 >
 > If using Docker Compose, no changes are needed as the `.env` file is already referenced in `compose.yaml` via the `env_file: .env` line.
 
+## Command Line Flags
+
+Redlib supports the following command line flags:
+
+- `-4`, `--ipv4-only`: Listen on IPv4 only.
+- `-6`, `--ipv6-only`: Listen on IPv6 only.
+- `-r`, `--redirect-https`: Redirect all HTTP requests to HTTPS (no longer functional).
+- `-a`, `--address <ADDRESS>`: Sets address to listen on. Default is `[::]`.
+- `-p`, `--port <PORT>`: Port to listen on. Default is `8080`.
+- `-H`, `--hsts <EXPIRE_TIME>`: HSTS header to tell browsers that this site should only be accessed over HTTPS. Default is `604800`.
+
 ## Instance settings
 
 Assign a default value for each instance-specific setting by passing environment variables to Redlib in the format `REDLIB_{X}`. Replace `{X}` with the setting name (see list below) in capital letters.
 
 | Name                      | Possible values | Default value          | Description                                                                                               |
-| ------------------------- | --------------- | ----------------       | --------------------------------------------------------------------------------------------------------- |
+|---------------------------|-----------------|------------------------|-----------------------------------------------------------------------------------------------------------|
 | `SFW_ONLY`                | `["on", "off"]` | `off`                  | Enables SFW-only mode for the instance, i.e. all NSFW content is filtered.                                |
 | `BANNER`                  | String          | (empty)                | Allows the server to set a banner to be displayed. Currently this is displayed on the instance info page. |
 | `ROBOTS_DISABLE_INDEXING` | `["on", "off"]` | `off`                  | Disables indexing of the instance by search engines.                                                      |
 | `PUSHSHIFT_FRONTEND`      | String          | `undelete.pullpush.io` | Allows the server to set the Pushshift frontend to be used with "removed" links.                          |
 | `PORT`                    | Integer 0-65535 | `8080`                 | The **internal** port Redlib listens on.                                                                  |
 | `ENABLE_RSS`              | `["on", "off"]` | `off`                  | Enables RSS feed generation.                                                                              |
-| `FULL_URL`                | String          | (empty)                | Allows for proper URLs (for now, only needed by RSS)
+| `FULL_URL`                | String          | (empty)                | Allows for proper URLs (for now, only needed by RSS)                                                      |
+
 ## Default user settings
 
 Assign a default value for each user-modifiable setting by passing environment variables to Redlib in the format `REDLIB_DEFAULT_{Y}`. Replace `{Y}` with the setting name (see list below) in capital letters.
 
-| Name                                | Possible values                                                                                                                    | Default value |
-| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------------- |
-| `THEME`                             | `["system", "light", "dark", "black", "dracula", "nord", "laserwave", "violet", "gold", "rosebox", "gruvboxdark", "gruvboxlight", "tokyoNight", "icebergDark"]` | `system`      |
-| `FRONT_PAGE`                        | `["default", "popular", "all"]`                                                                                                    | `default`     |
-| `LAYOUT`                            | `["card", "clean", "compact"]`                                                                                                     | `card`        |
-| `WIDE`                              | `["on", "off"]`                                                                                                                    | `off`         |
-| `POST_SORT`                         | `["hot", "new", "top", "rising", "controversial"]`                                                                                 | `hot`         |
-| `COMMENT_SORT`                      | `["confidence", "top", "new", "controversial", "old"]`                                                                             | `confidence`  |
-| `BLUR_SPOILER`                         | `["on", "off"]`                                                                                                                    | `off`         |
-| `SHOW_NSFW`                         | `["on", "off"]`                                                                                                                    | `off`         |
-| `BLUR_NSFW`                         | `["on", "off"]`                                                                                                                    | `off`         |
-| `USE_HLS`                           | `["on", "off"]`                                                                                                                    | `off`         |
-| `HIDE_HLS_NOTIFICATION`             | `["on", "off"]`                                                                                                                    | `off`         |
-| `AUTOPLAY_VIDEOS`                   | `["on", "off"]`                                                                                                                    | `off`         |
-| `SUBSCRIPTIONS`                     | `+`-delimited list of subreddits (`sub1+sub2+sub3+...`)                                                                            | _(none)_      |
-| `HIDE_AWARDS`                       | `["on", "off"]`                                                                                                                    | `off`         |
-| `DISABLE_VISIT_REDDIT_CONFIRMATION` | `["on", "off"]`                                                                                                                    | `off`         |
-| `HIDE_SCORE`                        | `["on", "off"]`                                                                                                                    | `off`         |
-| `HIDE_SIDEBAR_AND_SUMMARY`          | `["on", "off"]`                                                                                                                    | `off`         |
-| `FIXED_NAVBAR`                      | `["on", "off"]`                                                                                                                    | `on`          |
+| Name                                | Possible values                                                                                                                                                                                                                 | Default value |
+|-------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------|
+| `THEME`                             | `["system", "light", "dark", "black", "dracula", "nord", "laserwave", "violet", "gold", "rosebox", "gruvboxdark", "gruvboxlight", "tokyoNight", "icebergDark", "doomone", "libredditBlack", "libredditDark", "libredditLight"]` | `system`      |
+| `FRONT_PAGE`                        | `["default", "popular", "all"]`                                                                                                                                                                                                 | `default`     |
+| `LAYOUT`                            | `["card", "clean", "compact"]`                                                                                                                                                                                                  | `card`        |
+| `WIDE`                              | `["on", "off"]`                                                                                                                                                                                                                 | `off`         |
+| `POST_SORT`                         | `["hot", "new", "top", "rising", "controversial"]`                                                                                                                                                                              | `hot`         |
+| `COMMENT_SORT`                      | `["confidence", "top", "new", "controversial", "old"]`                                                                                                                                                                          | `confidence`  |
+| `BLUR_SPOILER`                      | `["on", "off"]`                                                                                                                                                                                                                 | `off`         |
+| `SHOW_NSFW`                         | `["on", "off"]`                                                                                                                                                                                                                 | `off`         |
+| `BLUR_NSFW`                         | `["on", "off"]`                                                                                                                                                                                                                 | `off`         |
+| `USE_HLS`                           | `["on", "off"]`                                                                                                                                                                                                                 | `off`         |
+| `HIDE_HLS_NOTIFICATION`             | `["on", "off"]`                                                                                                                                                                                                                 | `off`         |
+| `AUTOPLAY_VIDEOS`                   | `["on", "off"]`                                                                                                                                                                                                                 | `off`         |
+| `SUBSCRIPTIONS`                     | `+`-delimited list of subreddits (`sub1+sub2+sub3+...`)                                                                                                                                                                         | _(none)_      |
+| `HIDE_AWARDS`                       | `["on", "off"]`                                                                                                                                                                                                                 | `off`         |
+| `DISABLE_VISIT_REDDIT_CONFIRMATION` | `["on", "off"]`                                                                                                                                                                                                                 | `off`         |
+| `HIDE_SCORE`                        | `["on", "off"]`                                                                                                                                                                                                                 | `off`         |
+| `HIDE_SIDEBAR_AND_SUMMARY`          | `["on", "off"]`                                                                                                                                                                                                                 | `off`         |
+| `FIXED_NAVBAR`                      | `["on", "off"]`                                                                                                                                                                                                                 | `on`          |
+| `REMOVE_DEFAULT_FEEDS`              | `["on", "off"]`                                                                                                                                                                                                                 | `off`         |
+
+## Forward Proxies
+
+Redlib [supports](https://docs.rs/wreq/latest/wreq/#proxies) proxy usage using the standard `HTTP_PROXY` and
+`HTTPS_PROXY` environment variables. Use `ALL_PROXY` to set both at the same time (which you want to do).
+
+- `http://` is the scheme for http proxy
+- `https://` is the scheme for https proxy
+- `socks4://` is the scheme for socks4 proxy
+- `socks4a://` is the scheme for socks4a proxy
+- `socks5://` is the scheme for socks5 proxy
+- `socks5h://` is the scheme for socks5h proxy
+
+## Security
+
+This project uses [BoringSSL](https://boringssl.googlesource.com/boringssl/), built from source with patches from
+the [wreq](https://github.com/0x676e67/wreq) project. Certificates are validated against the embedded trust store from Mozilla.
+
+## Building
+
+Since Redlib uses [`boring-sys2`](https://crates.io/crates/boring-sys2), to build Redlib you will need to build
+BoringSSL from source.
+
+### Linux/MacOS
+
+Refer to the [boringssl](https://github.com/google/boringssl/blob/main/BUILDING.md) documentation for dependencies.
+
+### Windows
+
+Install MSVC, which you likely already have for Rust.
+
+```pwsh
+# Make sure to update your PATH, some of the installers don't do that by default (hense -i, interactive mode).
+winget install -i Kitware.CMake
+winget install -i NASM.NASM
+winget install -i LLVM.LLVM
+
+# For tests.
+winget install GoLang.Go
+```

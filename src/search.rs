@@ -1,14 +1,14 @@
-// CRATES
+#![allow(clippy::cmp_owned)]
 use crate::utils::{self, catch_random, error, filter_posts, format_num, format_url, get_filters, param, redirect, setting, template, val, Post, Preferences};
 use crate::{
 	client::json,
+	server::RequestExt,
 	subreddit::{can_access_quarantine, quarantine},
-	RequestExt,
 };
 use askama::Template;
 use hyper::{Body, Request, Response};
-use once_cell::sync::Lazy;
 use regex::Regex;
+use std::sync::LazyLock;
 
 // STRUCTS
 struct SearchParams {
@@ -49,8 +49,8 @@ struct SearchTemplate {
 	no_posts: bool,
 }
 
-// Regex matched against search queries to determine if they are reddit urls.
-static REDDIT_URL_MATCH: Lazy<Regex> = Lazy::new(|| Regex::new(r"^https?://([^\./]+\.)*reddit.com/").unwrap());
+/// Regex matched against search queries to determine if they are reddit urls.
+static REDDIT_URL_MATCH: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^https?://([^\./]+\.)*reddit.com/").unwrap());
 
 // SERVICES
 pub async fn find(req: Request<Body>) -> Result<Response<Body>, String> {
@@ -60,7 +60,8 @@ pub async fn find(req: Request<Body>) -> Result<Response<Body>, String> {
 	} else {
 		""
 	};
-	let path = format!("{}.json?{}{}&raw_json=1", req.uri().path(), req.uri().query().unwrap_or_default(), nsfw_results);
+	let uri_path = req.uri().path().replace("+", "%2B");
+	let path = format!("{}.json?{}{}&raw_json=1", uri_path, req.uri().query().unwrap_or_default(), nsfw_results);
 	let mut query = param(&path, "q").unwrap_or_default();
 	query = REDDIT_URL_MATCH.replace(&query, "").to_string();
 
@@ -68,8 +69,16 @@ pub async fn find(req: Request<Body>) -> Result<Response<Body>, String> {
 		return Ok(redirect("/"));
 	}
 
-	if query.starts_with("r/") {
+	if query.starts_with("r/") || query.starts_with("user/") {
 		return Ok(redirect(&format!("/{query}")));
+	}
+
+	if query.starts_with("R/") {
+		return Ok(redirect(&format!("/r{}", &query[1..])));
+	}
+
+	if query.starts_with("u/") || query.starts_with("U/") {
+		return Ok(redirect(&format!("/user{}", &query[1..])));
 	}
 
 	let sub = req.param("sub").unwrap_or_default();
