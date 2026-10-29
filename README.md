@@ -393,6 +393,25 @@ REDLIB_DEFAULT_USE_HLS = "on"
 >
 > If using Docker Compose, no changes are needed as the `.env` file is already referenced in `compose.yaml` via the `env_file: .env` line.
 
+## Reddit API credentials
+
+Reddit blocks the anonymous client Redlib uses by default, which breaks
+listings, post pages and comments. Register a free Reddit app and give Redlib
+its credentials:
+
+1. Open <https://www.reddit.com/prefs/apps> and choose **create another app...**.
+2. Select type **script**, name it anything, and set the redirect URI to
+   `http://localhost:8080` (it is unused). Create the app.
+3. Set `REDLIB_REDDIT_CLIENT_ID` to the ID shown below the app name and
+   `REDLIB_REDDIT_CLIENT_SECRET` to the app's `secret`.
+4. Optionally set `REDLIB_REDDIT_USER_AGENT` to a unique description such as
+   `web:redlib:0.40.0 (by /u/your_username)`. Reddit recommends including your
+   username.
+
+An **installed app** also works: set only `REDLIB_REDDIT_CLIENT_ID` and leave
+`REDLIB_REDDIT_CLIENT_SECRET` empty. When no client ID is set, Redlib uses its
+anonymous Android client as before.
+
 ## Command Line Flags
 
 Redlib supports the following command line flags:
@@ -417,6 +436,9 @@ Assign a default value for each instance-specific setting by passing environment
 | `PORT`                    | Integer 0-65535 | `8080`                 | The **internal** port Redlib listens on.                                                                  |
 | `ENABLE_RSS`              | `["on", "off"]` | `off`                  | Enables RSS feed generation.                                                                              |
 | `FULL_URL`                | String          | (empty)                | Allows for proper URLs (for now, only needed by RSS)                                                      |
+| `REDDIT_CLIENT_ID`        | String          | (empty)                | Client ID of the Reddit app Redlib authenticates as. See [Reddit API credentials](#reddit-api-credentials). |
+| `REDDIT_CLIENT_SECRET`    | String          | (empty)                | Secret of the Reddit app. Leave empty for an installed app.                                                |
+| `REDDIT_USER_AGENT`       | String          | `web:redlib:<version> (self-hosted)` | Unique User-Agent sent to Reddit.                                                            |
 
 ## Default user settings
 

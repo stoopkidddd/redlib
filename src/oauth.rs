@@ -5,13 +5,20 @@ use crate::{
 use base64::{engine::general_purpose, Engine as _};
 use log::{error, info, trace, warn};
 use serde_json::json;
-use std::{collections::HashMap, sync::atomic::Ordering, time::Duration};
+use std::{collections::HashMap, env, sync::atomic::Ordering, time::Duration};
 use tegen::tegen::TextGenerator;
 use tokio::time::{error::Elapsed, timeout};
 
 const REDDIT_ANDROID_OAUTH_CLIENT_ID: &str = "ohXpoqrZYub1kg";
 
 const AUTH_ENDPOINT: &str = "https://www.reddit.com";
+const REDDIT_API_TOKEN_ENDPOINT: &str = "https://www.reddit.com/api/v1/access_token";
+
+// Credentials for a Reddit app registered at https://www.reddit.com/prefs/apps.
+// A "script" app supplies both values; an "installed app" has no secret.
+const REDDIT_CLIENT_ID_ENV: &str = "REDLIB_REDDIT_CLIENT_ID";
+const REDDIT_CLIENT_SECRET_ENV: &str = "REDLIB_REDDIT_CLIENT_SECRET";
+const REDDIT_USER_AGENT_ENV: &str = "REDLIB_REDDIT_USER_AGENT";
 
 const OAUTH_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -33,6 +40,7 @@ trait OauthBackend: Send + Sync {
 // OAuth backend implementations
 #[derive(Debug, Clone)]
 pub(crate) enum OauthBackendImpl {
+	OfficialApi(RedditApiAuth),
 	MobileSpoof(MobileSpoofAuth),
 	GenericWeb(GenericWebAuth),
 }
@@ -40,6 +48,7 @@ pub(crate) enum OauthBackendImpl {
 impl OauthBackend for OauthBackendImpl {
 	async fn authenticate(&mut self) -> Result<OauthResponse, AuthError> {
 		match self {
+			OauthBackendImpl::OfficialApi(backend) => backend.authenticate().await,
 			OauthBackendImpl::MobileSpoof(backend) => backend.authenticate().await,
 			OauthBackendImpl::GenericWeb(backend) => backend.authenticate().await,
 		}
@@ -47,6 +56,7 @@ impl OauthBackend for OauthBackendImpl {
 
 	fn user_agent(&self) -> &str {
 		match self {
+			OauthBackendImpl::OfficialApi(backend) => backend.user_agent(),
 			OauthBackendImpl::MobileSpoof(backend) => backend.user_agent(),
 			OauthBackendImpl::GenericWeb(backend) => backend.user_agent(),
 		}
@@ -54,6 +64,7 @@ impl OauthBackend for OauthBackendImpl {
 
 	fn get_headers(&self) -> HashMap<String, String> {
 		match self {
+			OauthBackendImpl::OfficialApi(backend) => backend.get_headers(),
 			OauthBackendImpl::MobileSpoof(backend) => backend.get_headers(),
 			OauthBackendImpl::GenericWeb(backend) => backend.get_headers(),
 		}
@@ -71,9 +82,17 @@ pub struct Oauth {
 impl Oauth {
 	/// Create a new OAuth client
 	pub(crate) async fn new() -> Self {
-		// Try MobileSpoofAuth first, then fall back to GenericWebAuth
+		// A registered Reddit app is used whenever its client ID is configured.
+		// Otherwise keep the anonymous mobile client for compatibility.
+		let mut backend = match RedditApiAuth::from_env() {
+			Some(backend) => {
+				info!("[🔑] Using the official Reddit API client");
+				OauthBackendImpl::OfficialApi(backend)
+			}
+			None => OauthBackendImpl::MobileSpoof(MobileSpoofAuth::new()),
+		};
+
 		let mut failure_count = 0;
-		let mut backend = OauthBackendImpl::MobileSpoof(MobileSpoofAuth::new());
 
 		loop {
 			let attempt = Self::new_with_timeout_with_backend(backend.clone()).await;
@@ -83,14 +102,13 @@ impl Oauth {
 					return oauth;
 				}
 				Ok(Err(e)) => {
-					error!(
-						"[⛔] Failed to create OAuth client: {}. Retrying in 5 seconds...",
-						match e {
-							AuthError::Wreq(error) => error.to_string(),
-							AuthError::SerdeDeserialize(error) => error.to_string(),
-							AuthError::Field((value, error)) => format!("{error}\n{value}"),
-						}
-					);
+					let message = match e {
+						AuthError::Wreq(error) => error.to_string(),
+						AuthError::SerdeDeserialize(error) => error.to_string(),
+						AuthError::Field((value, error)) => format!("{error}\n{value}"),
+						AuthError::Http { status, body } => format!("Reddit returned HTTP {status}: {body}"),
+					};
+					error!("[⛔] Failed to create OAuth client: {message}. Retrying in 5 seconds...");
 				}
 				Err(_) => {
 					error!("[⛔] Failed to create OAuth client before timeout. Retrying in 5 seconds...");
@@ -99,7 +117,9 @@ impl Oauth {
 
 			failure_count += 1;
 
-			// Switch to GenericWeb after 5 failures with MobileSpoof
+			// Switch to GenericWeb after 5 failures with MobileSpoof. Registered
+			// app credentials are never replaced with a spoofed client: that
+			// would hide a configuration error and run into Reddit's blocks.
 			if matches!(backend, OauthBackendImpl::MobileSpoof(_)) && failure_count >= 5 {
 				warn!("[🔄] MobileSpoofAuth failed 5 times. Falling back to GenericWebAuth...");
 				backend = OauthBackendImpl::GenericWeb(GenericWebAuth::new());
@@ -107,7 +127,7 @@ impl Oauth {
 
 			// Crash after 10 total failures
 			if failure_count >= 10 {
-				error!("[⛔] Failed to create OAuth client (mobile + generic)");
+				error!("[⛔] Failed to create OAuth client");
 				std::process::exit(1);
 			}
 
@@ -136,6 +156,11 @@ impl Oauth {
 	pub fn user_agent(&self) -> &str {
 		self.backend.user_agent()
 	}
+
+	/// Whether requests are authenticated with a registered Reddit app.
+	pub fn official_api(&self) -> bool {
+		matches!(self.backend, OauthBackendImpl::OfficialApi(_))
+	}
 }
 
 #[derive(Debug)]
@@ -143,6 +168,7 @@ enum AuthError {
 	Wreq(wreq::Error),
 	SerdeDeserialize(serde_json::Error),
 	Field((serde_json::Value, &'static str)),
+	Http { status: u16, body: String },
 }
 
 impl From<wreq::Error> for AuthError {
@@ -198,6 +224,127 @@ struct Device {
 	initial_headers: HashMap<String, String>,
 	headers: HashMap<String, String>,
 	user_agent: String,
+}
+
+// Official API backend - authenticates a Reddit app registered by the operator.
+#[derive(Debug, Clone)]
+pub struct RedditApiAuth {
+	client_id: String,
+	client_secret: Option<String>,
+	device_id: String,
+	user_agent: String,
+}
+
+impl RedditApiAuth {
+	fn from_env() -> Option<Self> {
+		let client_id = env_value(REDDIT_CLIENT_ID_ENV)?;
+		let client_secret = env_value(REDDIT_CLIENT_SECRET_ENV);
+		let user_agent = env_value(REDDIT_USER_AGENT_ENV).unwrap_or_else(default_user_agent);
+
+		info!(
+			"[🔑] Using registered Reddit app \"{client_id}\" with {} authentication",
+			if client_secret.is_some() { "client credentials" } else { "installed app" }
+		);
+
+		Some(Self {
+			client_id,
+			client_secret,
+			device_id: random_device_id(),
+			user_agent,
+		})
+	}
+
+	fn token_request_body(&self) -> String {
+		match self.client_secret {
+			// A "script" app has a secret and uses the application-only flow.
+			Some(_) => "grant_type=client_credentials".to_owned(),
+			// An "installed app" has no secret and identifies the device instead.
+			None => format!("grant_type=https%3A%2F%2Foauth.reddit.com%2Fgrants%2Finstalled_client&device_id={}", self.device_id),
+		}
+	}
+}
+
+impl OauthBackend for RedditApiAuth {
+	async fn authenticate(&mut self) -> Result<OauthResponse, AuthError> {
+		let credentials = format!("{}:{}", self.client_id, self.client_secret.as_deref().unwrap_or_default());
+		let auth = general_purpose::STANDARD.encode(credentials);
+
+		trace!("Requesting a Reddit API token...");
+		let response = CLIENT
+			.post(REDDIT_API_TOKEN_ENDPOINT)
+			.header("User-Agent", &self.user_agent)
+			.header("Authorization", format!("Basic {auth}"))
+			.header("Content-Type", "application/x-www-form-urlencoded")
+			.header("Accept", "application/json")
+			.body(self.token_request_body())
+			.send()
+			.await?;
+
+		let status = response.status();
+		let body = response.text().await?;
+
+		if !status.is_success() {
+			return Err(AuthError::Http {
+				status: status.as_u16(),
+				body: truncate_for_log(&body, 300),
+			});
+		}
+
+		let json: serde_json::Value = serde_json::from_str(&body)?;
+		let token = json
+			.get("access_token")
+			.ok_or_else(|| AuthError::Field((json.clone(), "access_token")))?
+			.as_str()
+			.ok_or_else(|| AuthError::Field((json.clone(), "access_token: as_str")))?
+			.to_owned();
+		let expires_in = json
+			.get("expires_in")
+			.ok_or_else(|| AuthError::Field((json.clone(), "expires_in")))?
+			.as_u64()
+			.ok_or_else(|| AuthError::Field((json.clone(), "expires_in: as_u64")))?;
+
+		info!("[✅] Reddit API token acquired, expires in {expires_in} seconds");
+
+		Ok(OauthResponse {
+			token,
+			expires_in,
+			additional_headers: HashMap::new(),
+		})
+	}
+
+	fn user_agent(&self) -> &str {
+		&self.user_agent
+	}
+
+	fn get_headers(&self) -> HashMap<String, String> {
+		HashMap::from([("User-Agent".to_owned(), self.user_agent.clone())])
+	}
+}
+
+fn env_value(key: &str) -> Option<String> {
+	env::var(key).ok().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty())
+}
+
+fn default_user_agent() -> String {
+	format!("web:redlib:{} (self-hosted)", env!("CARGO_PKG_VERSION"))
+}
+
+fn random_device_id() -> String {
+	const CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+	(0..30)
+		.map(|_| {
+			let idx = fastrand::usize(..CHARS.len());
+			CHARS[idx] as char
+		})
+		.collect()
+}
+
+fn truncate_for_log(body: &str, max_chars: usize) -> String {
+	let mut truncated: String = body.chars().take(max_chars).collect();
+	if body.chars().count() > max_chars {
+		truncated.push('…');
+	}
+	truncated
 }
 
 // MobileSpoofAuth backend - spoofs an Android mobile device
@@ -472,6 +619,43 @@ fn choose<T: Copy>(list: &[T]) -> T {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use sealed_test::prelude::*;
+
+	#[test]
+	#[sealed_test(env = [("REDLIB_REDDIT_CLIENT_ID", "test-client"), ("REDLIB_REDDIT_CLIENT_SECRET", "test-secret")])]
+	fn test_official_auth_script_app() {
+		let auth = RedditApiAuth::from_env().expect("client ID should enable the official backend");
+
+		assert_eq!(auth.token_request_body(), "grant_type=client_credentials");
+		assert_eq!(auth.user_agent(), default_user_agent());
+		assert!(!auth.user_agent().contains("Android"));
+		assert_eq!(auth.get_headers().get("User-Agent").map(String::as_str), Some(default_user_agent().as_str()));
+	}
+
+	#[test]
+	#[sealed_test(env = [("REDLIB_REDDIT_CLIENT_ID", "test-client"), ("REDLIB_REDDIT_CLIENT_SECRET", "")])]
+	fn test_official_auth_installed_app() {
+		let auth = RedditApiAuth::from_env().expect("client ID should enable the official backend");
+
+		assert!(auth
+			.token_request_body()
+			.starts_with("grant_type=https%3A%2F%2Foauth.reddit.com%2Fgrants%2Finstalled_client"));
+		assert!(auth.token_request_body().contains("&device_id="));
+		assert_eq!(auth.device_id.len(), 30);
+	}
+
+	#[test]
+	#[sealed_test(env = [("REDLIB_REDDIT_CLIENT_ID", ""), ("REDLIB_REDDIT_USER_AGENT", "test-agent/1.0")])]
+	fn test_official_auth_requires_client_id() {
+		assert!(RedditApiAuth::from_env().is_none());
+	}
+
+	#[test]
+	#[sealed_test(env = [("REDLIB_REDDIT_CLIENT_ID", "test-client"), ("REDLIB_REDDIT_USER_AGENT", "test-agent/1.0")])]
+	fn test_official_auth_user_agent_override() {
+		let auth = RedditApiAuth::from_env().unwrap();
+		assert_eq!(auth.user_agent(), "test-agent/1.0");
+	}
 
 	#[tokio::test(flavor = "multi_thread")]
 	async fn test_mobile_spoof_backend() {

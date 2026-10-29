@@ -1,5 +1,5 @@
 #![allow(clippy::cmp_owned)]
-use crate::client::json;
+use crate::client::{json, OAUTH_CLIENT};
 use crate::config::get_setting;
 use crate::server::RequestExt;
 use crate::shreddit;
@@ -30,7 +30,6 @@ struct PostTemplate {
 static COMMENT_SEARCH_CAPTURE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\?q=(.*)&type=comment").unwrap());
 
 pub async fn item(req: Request<Body>) -> Result<Response<Body>, String> {
-	let id = req.param("id").unwrap_or_default();
 	let sub = req.param("sub").unwrap_or_default();
 	let quarantined = can_access_quarantine(&req, &sub);
 	let url = req.uri().to_string();
@@ -41,66 +40,97 @@ pub async fn item(req: Request<Body>) -> Result<Response<Body>, String> {
 	let single_thread = req.param("comment_id").is_some();
 	let highlighted_comment = &req.param("comment_id").unwrap_or_default();
 
-	// Reddit blocks the comments API for anonymous clients, so fetch the post
-	// by ID and its comments from the web frontend.
-	match json(format!("/by_id/t3_{id}.json?raw_json=1"), quarantined).await {
-		Ok(response) => {
-			let post_json = &response["data"]["children"][0];
-			if post_json.is_null() {
-				return error(req, "Post not found").await;
-			}
-			// Parse the JSON into Post and Comment structs
-			let post = parse_post(post_json).await;
+	// A registered Reddit app can load the post and its comments in one API
+	// request. Without one, Reddit blocks the comments route for the anonymous
+	// client, so the post is fetched by ID and comments from the web frontend.
+	let official_api = OAUTH_CLIENT.load().official_api();
+	let fetched = if official_api {
+		api_post_and_comments(&req, &url, &sort, quarantined).await
+	} else {
+		shreddit_post_and_comments(&req, &url, &sort, quarantined).await
+	};
 
-			let req_url = req.uri().to_string();
-			// Return landing page if this post if this Reddit deems this post
-			// NSFW, but we have also disabled the display of NSFW content
-			// or if the instance is SFW-only.
-			if post.nsfw && crate::utils::should_be_nsfw_gated(&req, &req_url) {
-				return Ok(nsfw_landing(req, req_url).await.unwrap_or_default());
-			}
-
-			let comments_json = match shreddit::comments(post.community.clone(), id, req.param("comment_id"), sort.clone(), param(&url, "context")).await {
-				Ok(comments_json) => comments_json,
-				Err(msg) => return error(req, &msg).await,
-			};
-
-			let query_body = match COMMENT_SEARCH_CAPTURE.captures(&url) {
-				Some(captures) => captures.get(1).unwrap().as_str().replace("%20", " ").replace('+', " "),
-				None => String::new(),
-			};
-
-			let query_string = format!("q={query_body}&type=comment");
-			let form = url::form_urlencoded::parse(query_string.as_bytes()).collect::<HashMap<_, _>>();
-			let query = form.get("q").unwrap().clone().to_string();
-
-			let comments = match query.as_str() {
-				"" => parse_comments(&comments_json, &post.permalink, &post.author.name, highlighted_comment, &get_filters(&req), &req),
-				_ => query_comments(&comments_json, &post.permalink, &post.author.name, highlighted_comment, &get_filters(&req), &query, &req),
-			};
-
-			// Use the Post and Comment structs to generate a website to show users
-			Ok(template(&PostTemplate {
-				comments,
-				post,
-				url_without_query: url.clone().trim_end_matches(&format!("?q={query}&type=comment")).to_string(),
-				sort,
-				prefs: Preferences::new(&req),
-				single_thread,
-				url: req_url,
-				comment_query: query,
-			}))
-		}
-		// If the Reddit API returns an error, exit and send error page to user
+	// If the Reddit API returns an error, exit and send error page to user
+	let (post, comments_json) = match fetched {
+		Ok(fetched) => fetched,
 		Err(msg) => {
 			if msg == "quarantined" || msg == "gated" {
-				let sub = req.param("sub").unwrap_or_default();
-				Ok(quarantine(&req, sub, &msg))
-			} else {
-				error(req, &msg).await
+				return Ok(quarantine(&req, sub, &msg));
 			}
+			return error(req, &msg).await;
 		}
+	};
+
+	let req_url = req.uri().to_string();
+	// Return landing page if this post if this Reddit deems this post
+	// NSFW, but we have also disabled the display of NSFW content
+	// or if the instance is SFW-only.
+	if post.nsfw && crate::utils::should_be_nsfw_gated(&req, &req_url) {
+		return Ok(nsfw_landing(req, req_url).await.unwrap_or_default());
 	}
+
+	let query_body = match COMMENT_SEARCH_CAPTURE.captures(&url) {
+		Some(captures) => captures.get(1).unwrap().as_str().replace("%20", " ").replace('+', " "),
+		None => String::new(),
+	};
+
+	let query_string = format!("q={query_body}&type=comment");
+	let form = url::form_urlencoded::parse(query_string.as_bytes()).collect::<HashMap<_, _>>();
+	let query = form.get("q").unwrap().clone().to_string();
+
+	let comments = match query.as_str() {
+		"" => parse_comments(&comments_json, &post.permalink, &post.author.name, highlighted_comment, &get_filters(&req), &req),
+		_ => query_comments(&comments_json, &post.permalink, &post.author.name, highlighted_comment, &get_filters(&req), &query, &req),
+	};
+
+	// Use the Post and Comment structs to generate a website to show users
+	Ok(template(&PostTemplate {
+		comments,
+		post,
+		url_without_query: url.clone().trim_end_matches(&format!("?q={query}&type=comment")).to_string(),
+		sort,
+		prefs: Preferences::new(&req),
+		single_thread,
+		url: req_url,
+		comment_query: query,
+	}))
+}
+
+/// Fetches a post and its comments through the registered app's API. The
+/// comments route returns `[post listing, comment listing]`.
+async fn api_post_and_comments(req: &Request<Body>, url: &str, sort: &str, quarantined: bool) -> Result<(Post, serde_json::Value), String> {
+	let mut params = vec!["raw_json=1".to_owned()];
+	if let Some(query) = req.uri().query().filter(|query| !query.is_empty()) {
+		params.push(query.to_owned());
+	}
+	// The URL has no sort parameter when the cookie default is used.
+	if param(url, "sort").is_none() && !sort.is_empty() {
+		params.push(format!("sort={sort}"));
+	}
+
+	let path = format!("{}.json?{}", req.uri().path(), params.join("&"));
+	let response = json(path, quarantined).await?;
+	let post_json = &response[0]["data"]["children"][0];
+	if post_json.is_null() {
+		return Err("Post not found".to_owned());
+	}
+
+	Ok((parse_post(post_json).await, response[1].clone()))
+}
+
+/// Fetches the post by ID and its comments from Reddit's web frontend.
+async fn shreddit_post_and_comments(req: &Request<Body>, url: &str, sort: &str, quarantined: bool) -> Result<(Post, serde_json::Value), String> {
+	let id = req.param("id").unwrap_or_default();
+	let response = json(format!("/by_id/t3_{id}.json?raw_json=1"), quarantined).await?;
+	let post_json = &response["data"]["children"][0];
+	if post_json.is_null() {
+		return Err("Post not found".to_owned());
+	}
+
+	let post = parse_post(post_json).await;
+	let comments_json = shreddit::comments(post.community.clone(), id, req.param("comment_id"), sort.to_owned(), param(url, "context")).await?;
+
+	Ok((post, comments_json))
 }
 
 // COMMENTS

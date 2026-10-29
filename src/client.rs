@@ -377,8 +377,10 @@ fn reddit_short_head(path: String, quarantine: bool, base_path: &'static str, ho
 /// in its response.
 fn request(method: &'static Method, path: String, redirect: bool, quarantine: bool, base_path: &'static str, host: &'static str) -> Boxed<Result<WreqResponse, String>> {
 	// Keep the logical path unchanged for caches and diagnostics. Reddit blocks
-	// literal anonymous comments routes, so only rewrite the outgoing URL.
-	let transport_path = comments_transport_path(&path);
+	// literal anonymous comments routes, so the spoofed client rewrites those.
+	// A registered app is allowed to use the normal route.
+	let client = OAUTH_CLIENT.load_full();
+	let transport_path = request_transport_path(&path, client.official_api());
 	let url = format!("{base_path}{transport_path}");
 
 	let mut headers: Vec<(String, String)> = vec![
@@ -393,11 +395,8 @@ fn request(method: &'static Method, path: String, redirect: bool, quarantine: bo
 		),
 	];
 
-	{
-		let client = OAUTH_CLIENT.load_full();
-		for (key, value) in client.headers_map.clone() {
-			headers.push((key, value));
-		}
+	for (key, value) in client.headers_map.clone() {
+		headers.push((key, value));
 	}
 
 	// shuffle headers: https://github.com/redlib-org/redlib/issues/324
@@ -466,6 +465,16 @@ fn request(method: &'static Method, path: String, redirect: bool, quarantine: bo
 	.boxed()
 }
 
+/// Selects the outgoing path for the configured OAuth backend. A registered
+/// app may use the literal comments route; the anonymous client may not.
+fn request_transport_path(path: &str, official_api: bool) -> Cow<'_, str> {
+	if official_api {
+		Cow::Borrowed(path)
+	} else {
+		comments_transport_path(path)
+	}
+}
+
 /// Encode one separator in comments API routes to avoid Reddit's anonymous
 /// request block while leaving every other path and the query string intact.
 fn comments_transport_path(path: &str) -> Cow<'_, str> {
@@ -531,7 +540,9 @@ pub async fn json(path: String, quarantine: bool) -> Result<Value, String> {
 	// First, handle rolling over the OAUTH_CLIENT if need be.
 	let current_rate_limit = OAUTH_RATELIMIT_REMAINING.load(Ordering::SeqCst);
 	let is_rolling_over = OAUTH_IS_ROLLING_OVER.load(Ordering::SeqCst);
-	if current_rate_limit < 10 && !is_rolling_over {
+	// A registered app's quota belongs to the client, so a new token does not
+	// reset it. Only the spoofed client benefits from rolling over.
+	if current_rate_limit < 10 && !is_rolling_over && !OAUTH_CLIENT.load().official_api() {
 		warn!("Rate limit {current_rate_limit} is low. Spawning force_refresh_token()");
 		tokio::spawn(force_refresh_token());
 	}
@@ -652,9 +663,11 @@ async fn self_check(sub: &str) -> Result<(), String> {
 }
 
 pub async fn rate_limit_check() -> Result<(), String> {
-	// First, test the Oauth client: we can perform a rate limit check if the OAuth backend is MobileSpoof; if GenericWeb, we skip the check.
-	if matches!(OAUTH_CLIENT.load().backend, OauthBackendImpl::GenericWeb(_)) {
-		warn!("[⚠️] Cannot perform rate limit check, running as GenericWeb. Skipping check.");
+	// The check assumes a new token gets a fresh quota, which only holds for the
+	// anonymous mobile client. Registered apps and the generic web fallback
+	// share their quota across tokens, so skip it.
+	if !matches!(OAUTH_CLIENT.load().backend, OauthBackendImpl::MobileSpoof(_)) {
+		info!("[ℹ️] Skipping the rate limit check for the configured OAuth backend");
 		return Ok(());
 	}
 
@@ -758,6 +771,13 @@ mod tests {
 
 		let path = "/r/rust/comments/abc.json?sort=new&context=3&q=a%2Bb&empty=&sort=top";
 		assert_eq!(comments_transport_path(path), "/r/rust%2Fcomments/abc.json?sort=new&context=3&q=a%2Bb&empty=&sort=top");
+	}
+
+	#[test]
+	fn test_request_transport_path_respects_official_api() {
+		let path = "/r/rust/comments/18t5968/title/.json?sort=new";
+		assert_eq!(request_transport_path(path, true), Cow::Borrowed(path));
+		assert_eq!(request_transport_path(path, false), Cow::Borrowed("/r/rust%2Fcomments/18t5968/title/.json?sort=new"));
 	}
 
 	#[test]

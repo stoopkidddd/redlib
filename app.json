@@ -77,6 +77,15 @@
     "REDLIB_FULL_URL": {
       "required": false
     },
+    "REDLIB_REDDIT_CLIENT_ID": {
+      "required": false
+    },
+    "REDLIB_REDDIT_CLIENT_SECRET": {
+      "required": false
+    },
+    "REDLIB_REDDIT_USER_AGENT": {
+      "required": false
+    },
     "REDLIB_DEFAULT_REMOVE_DEFAULT_FEEDS": {
       "required": false
     }
