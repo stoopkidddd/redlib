@@ -580,8 +580,11 @@ pub async fn json(path: String, quarantine: bool) -> Result<Value, String> {
 					let has_remaining = body.has_remaining();
 
 					if !has_remaining {
-						// Rate limited, so spawn a force_refresh_token()
-						tokio::spawn(force_refresh_token());
+						// A new token gets a fresh quota only for the anonymous
+						// client; a registered app's quota is shared.
+						if !OAUTH_CLIENT.load().official_api() {
+							tokio::spawn(force_refresh_token());
+						}
 						return match reset {
 							Some(val) => Err(format!(
 								"Reddit rate limit exceeded. Try refreshing in a few seconds.\

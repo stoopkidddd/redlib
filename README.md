@@ -438,7 +438,7 @@ Assign a default value for each instance-specific setting by passing environment
 | `FULL_URL`                | String          | (empty)                | Allows for proper URLs (for now, only needed by RSS)                                                      |
 | `REDDIT_CLIENT_ID`        | String          | (empty)                | Client ID of the Reddit app Redlib authenticates as. See [Reddit API credentials](#reddit-api-credentials). |
 | `REDDIT_CLIENT_SECRET`    | String          | (empty)                | Secret of the Reddit app. Leave empty for an installed app.                                                |
-| `REDDIT_USER_AGENT`       | String          | `web:redlib:<version> (self-hosted)` | Unique User-Agent sent to Reddit.                                                            |
+| `REDDIT_USER_AGENT`       | String          | `web:<client ID>:<version> (self-hosted)` | Unique User-Agent sent to Reddit.                                                         |
 
 ## Default user settings
 

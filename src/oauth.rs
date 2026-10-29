@@ -239,7 +239,7 @@ impl RedditApiAuth {
 	fn from_env() -> Option<Self> {
 		let client_id = env_value(REDDIT_CLIENT_ID_ENV)?;
 		let client_secret = env_value(REDDIT_CLIENT_SECRET_ENV);
-		let user_agent = env_value(REDDIT_USER_AGENT_ENV).unwrap_or_else(default_user_agent);
+		let user_agent = env_value(REDDIT_USER_AGENT_ENV).unwrap_or_else(|| default_user_agent(&client_id));
 
 		info!(
 			"[🔑] Using registered Reddit app \"{client_id}\" with {} authentication",
@@ -325,8 +325,8 @@ fn env_value(key: &str) -> Option<String> {
 	env::var(key).ok().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty())
 }
 
-fn default_user_agent() -> String {
-	format!("web:redlib:{} (self-hosted)", env!("CARGO_PKG_VERSION"))
+fn default_user_agent(client_id: &str) -> String {
+	format!("web:{client_id}:{} (self-hosted)", env!("CARGO_PKG_VERSION"))
 }
 
 fn random_device_id() -> String {
@@ -627,9 +627,9 @@ mod tests {
 		let auth = RedditApiAuth::from_env().expect("client ID should enable the official backend");
 
 		assert_eq!(auth.token_request_body(), "grant_type=client_credentials");
-		assert_eq!(auth.user_agent(), default_user_agent());
+		assert_eq!(auth.user_agent(), default_user_agent("test-client"));
 		assert!(!auth.user_agent().contains("Android"));
-		assert_eq!(auth.get_headers().get("User-Agent").map(String::as_str), Some(default_user_agent().as_str()));
+		assert_eq!(auth.get_headers().get("User-Agent").map(String::as_str), Some(default_user_agent("test-client").as_str()));
 	}
 
 	#[test]
