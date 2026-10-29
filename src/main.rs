@@ -201,8 +201,12 @@ async fn main() {
 	LazyLock::force(&config::CONFIG);
 	info!("Evaluating instance info.");
 	LazyLock::force(&instance_info::INSTANCE_INFO);
-	info!("Creating OAUTH client.");
-	LazyLock::force(&OAUTH_CLIENT);
+	if redlib::oauth::official_api_configured() {
+		info!("Creating OAUTH client.");
+		LazyLock::force(&OAUTH_CLIENT);
+	} else {
+		info!("Using Reddit's web frontend; no OAuth client needed.");
+	}
 
 	// Define default headers (added to all responses)
 	app.default_headers = headers! {

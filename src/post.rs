@@ -1,8 +1,7 @@
 #![allow(clippy::cmp_owned)]
-use crate::client::{json, OAUTH_CLIENT};
+use crate::client::json;
 use crate::config::get_setting;
 use crate::server::RequestExt;
-use crate::shreddit;
 use crate::subreddit::{can_access_quarantine, quarantine};
 use crate::utils::{
 	error, format_num, get_filters, nsfw_landing, param, parse_post, rewrite_emotes, setting, template, time, val, Author, Awards, Comment, Flair, FlairPart, Post, Preferences,
@@ -40,15 +39,9 @@ pub async fn item(req: Request<Body>) -> Result<Response<Body>, String> {
 	let single_thread = req.param("comment_id").is_some();
 	let highlighted_comment = &req.param("comment_id").unwrap_or_default();
 
-	// A registered Reddit app can load the post and its comments in one API
-	// request. Without one, Reddit blocks the comments route for the anonymous
-	// client, so the post is fetched by ID and comments from the web frontend.
-	let official_api = OAUTH_CLIENT.load().official_api();
-	let fetched = if official_api {
-		api_post_and_comments(&req, &url, &sort, quarantined).await
-	} else {
-		shreddit_post_and_comments(&req, &url, &sort, quarantined).await
-	};
+	// With a registered app this is the normal comments API; otherwise
+	// `client::json` translates it from Reddit's web frontend.
+	let fetched = api_post_and_comments(&req, &url, &sort, quarantined).await;
 
 	// If the Reddit API returns an error, exit and send error page to user
 	let (post, comments_json) = match fetched {
@@ -96,8 +89,8 @@ pub async fn item(req: Request<Body>) -> Result<Response<Body>, String> {
 	}))
 }
 
-/// Fetches a post and its comments through the registered app's API. The
-/// comments route returns `[post listing, comment listing]`.
+/// Fetches a post and its comments. The comments route returns
+/// `[post listing, comment listing]`.
 async fn api_post_and_comments(req: &Request<Body>, url: &str, sort: &str, quarantined: bool) -> Result<(Post, serde_json::Value), String> {
 	let mut params = vec!["raw_json=1".to_owned()];
 	if let Some(query) = req.uri().query().filter(|query| !query.is_empty()) {
@@ -116,21 +109,6 @@ async fn api_post_and_comments(req: &Request<Body>, url: &str, sort: &str, quara
 	}
 
 	Ok((parse_post(post_json).await, response[1].clone()))
-}
-
-/// Fetches the post by ID and its comments from Reddit's web frontend.
-async fn shreddit_post_and_comments(req: &Request<Body>, url: &str, sort: &str, quarantined: bool) -> Result<(Post, serde_json::Value), String> {
-	let id = req.param("id").unwrap_or_default();
-	let response = json(format!("/by_id/t3_{id}.json?raw_json=1"), quarantined).await?;
-	let post_json = &response["data"]["children"][0];
-	if post_json.is_null() {
-		return Err("Post not found".to_owned());
-	}
-
-	let post = parse_post(post_json).await;
-	let comments_json = shreddit::comments(post.community.clone(), id, req.param("comment_id"), sort.to_owned(), param(url, "context")).await?;
-
-	Ok((post, comments_json))
 }
 
 // COMMENTS

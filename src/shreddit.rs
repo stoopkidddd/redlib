@@ -391,7 +391,7 @@ fn parse_more_comments(element: ElementRef<'_>) -> Option<MoreComments> {
 }
 
 /// Parse shreddit's RFC 3339 timestamps (`...Z` or `...+0000`) into Unix seconds.
-fn unix_time(timestamp: &str) -> Option<f64> {
+pub(crate) fn unix_time(timestamp: &str) -> Option<f64> {
 	DateTime::parse_from_rfc3339(timestamp)
 		.or_else(|_| DateTime::parse_from_str(timestamp, "%Y-%m-%dT%H:%M:%S%.f%z"))
 		.ok()

@@ -1,3 +1,4 @@
+#![recursion_limit = "512"]
 pub mod client;
 pub mod config;
 pub mod duplicates;
@@ -9,6 +10,7 @@ pub mod search;
 pub mod server;
 pub mod settings;
 pub mod shreddit;
+pub mod shreddit_api;
 pub mod subreddit;
 pub mod user;
 pub mod utils;

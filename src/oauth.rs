@@ -321,6 +321,12 @@ impl OauthBackend for RedditApiAuth {
 	}
 }
 
+/// Whether a registered Reddit app is configured. In that case Redlib
+/// prefers the official API; otherwise it uses Reddit's web frontend.
+pub fn official_api_configured() -> bool {
+	env_value(REDDIT_CLIENT_ID_ENV).is_some()
+}
+
 fn env_value(key: &str) -> Option<String> {
 	env::var(key).ok().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty())
 }

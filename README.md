@@ -393,11 +393,22 @@ REDLIB_DEFAULT_USE_HLS = "on"
 >
 > If using Docker Compose, no changes are needed as the `.env` file is already referenced in `compose.yaml` via the `env_file: .env` line.
 
-## Reddit API credentials
+## Reddit access
 
-Reddit blocks the anonymous client Redlib uses by default, which breaks
-listings, post pages and comments. Register a free Reddit app and give Redlib
-its credentials:
+By default, Redlib reads Reddit's logged-out web frontend. It uses the same
+`/svc/shreddit/` HTML fragments and thread pages the website serves to a
+browser, and converts them into the JSON shapes the templates expect. No Reddit
+account, cookie or API app is required. This covers the front page, subreddit
+and multi-subreddit listings, post pages and comments, search, user posts, media
+and RSS.
+
+A few less common pages are not translated yet and return an error: wiki pages,
+duplicate-post lists and per-user comment listings.
+
+### Optional: official Reddit API
+
+If you have a registered Reddit app, Redlib will use the official API instead of
+the web frontend. This is optional.
 
 1. Open <https://www.reddit.com/prefs/apps> and choose **create another app...**.
 2. Select type **script**, name it anything, and set the redirect URI to
@@ -409,8 +420,8 @@ its credentials:
    username.
 
 An **installed app** also works: set only `REDLIB_REDDIT_CLIENT_ID` and leave
-`REDLIB_REDDIT_CLIENT_SECRET` empty. When no client ID is set, Redlib uses its
-anonymous Android client as before.
+`REDLIB_REDDIT_CLIENT_SECRET` empty. When `REDLIB_REDDIT_CLIENT_ID` is unset,
+Redlib stays on the web frontend.
 
 ## Command Line Flags
 

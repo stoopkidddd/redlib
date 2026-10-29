@@ -36,6 +36,8 @@ const SHREDDIT_PATH_PREFIX: &str = "/svc/shreddit/";
 const SHREDDIT_PARTIAL_ACCEPT: &str = "text/vnd.reddit.partial+html, text/html;q=0.9";
 // Reddit answers rate-limited shreddit requests with this reCAPTCHA page and a 200 status.
 const SHREDDIT_CHALLENGE_TITLE: &str = "<title>Reddit - Prove your humanity</title>";
+// The logged-out proof-of-work challenge served for full HTML pages.
+const SHREDDIT_JS_CHALLENGE: &str = "await(async e=>e+e)";
 
 // Logged-out reddit.com session shared by shreddit requests. Reddit challenges
 // cookieless clients after about ten requests, but gives each session a budget
@@ -224,8 +226,9 @@ pub async fn proxy(req: HyperRequest<Body>, format: &str) -> Result<HyperRespons
 		}
 	}
 
-	// Add User-Agent header of the currently spoofed device
-	{
+	// The official client sets a descriptive User-Agent. Without it, the
+	// emulated browser client supplies its own browser User-Agent.
+	if crate::oauth::official_api_configured() {
 		let client = OAUTH_CLIENT.load_full();
 		builder = builder.header("User-Agent", client.user_agent());
 	}
@@ -352,7 +355,69 @@ async fn shreddit_body(response: WreqResponse, path: &str) -> Result<Option<Stri
 	}
 
 	let body = response.text().await.map_err(|e| format!("Failed receiving body from Reddit: {e} | {path}"))?;
-	Ok((!body.contains(SHREDDIT_CHALLENGE_TITLE)).then_some(body))
+	let challenged = body.contains(SHREDDIT_CHALLENGE_TITLE) || body.contains(SHREDDIT_JS_CHALLENGE);
+	Ok((!challenged).then_some(body))
+}
+
+/// Fetch a full server-rendered page from Reddit's web frontend. Unlike
+/// `shreddit_fragment`, this accepts ordinary routes such as
+/// `/r/{sub}/comments/{id}/...`, which is where post metadata lives.
+pub async fn shreddit_page(path: String) -> Result<String, String> {
+	if !path.starts_with('/') || path.starts_with("//") {
+		return Err(format!("Refusing to fetch non-Reddit path | {path}"));
+	}
+
+	if let Some(body) = shreddit_page_once(&path).await? {
+		return Ok(body);
+	}
+
+	warn!("Reddit challenged the web page session, starting a new one");
+	SHREDDIT_SESSION.clear();
+	// A feed partial is served logged out and gives the fresh session a usable cookie.
+	let _ = shreddit_request("/svc/shreddit/feeds/popular-feed?sort=HOT", None).await;
+	shreddit_page_once(&path)
+		.await?
+		.ok_or_else(|| format!("Reddit is challenging page requests. Try refreshing in a few seconds. | {path}"))
+}
+
+async fn shreddit_page_once(path: &str) -> Result<Option<String>, String> {
+	let mut target = path.to_owned();
+	for _ in 0..=SHREDDIT_MAX_REDIRECTS {
+		let url = format!("{ALTERNATIVE_REDDIT_URL_BASE}{target}");
+		let response = SHREDDIT_CLIENT
+			.get(&url)
+			.header(wreq_header::ACCEPT, SHREDDIT_PARTIAL_ACCEPT)
+			.cookie_provider(Arc::clone(&SHREDDIT_SESSION))
+			.send()
+			.await
+			.map_err(|e| format!("Couldn't send request to Reddit: {e} | {path}"))?;
+
+		let status = response.status();
+		if status.is_redirection() {
+			let location = response.headers().get(wreq_header::LOCATION).and_then(|value| value.to_str().ok()).unwrap_or_default();
+			target = page_redirect_target(location).ok_or_else(|| format!("Reddit redirected the page to {location:?} | {path}"))?;
+			continue;
+		}
+		if status == wreq::StatusCode::TOO_MANY_REQUESTS {
+			return Ok(None);
+		}
+		if !status.is_success() {
+			return Err(format!("Reddit returned {status} | {path}"));
+		}
+
+		let body = response.text().await.map_err(|e| format!("Failed receiving body from Reddit: {e} | {path}"))?;
+		let challenged = body.contains(SHREDDIT_CHALLENGE_TITLE) || body.contains(SHREDDIT_JS_CHALLENGE);
+		return Ok((!challenged).then_some(body));
+	}
+	Err(format!("Reddit redirected the page too many times | {path}"))
+}
+
+fn page_redirect_target(location: &str) -> Option<String> {
+	let path = location
+		.strip_prefix(ALTERNATIVE_REDDIT_URL_BASE)
+		.or_else(|| location.strip_prefix("https://reddit.com"))
+		.unwrap_or(location);
+	(path.starts_with('/') && !path.starts_with("//")).then(|| path.to_owned())
 }
 
 /// Makes a GET request to Reddit at `path`. By default, this will honor HTTP
@@ -379,8 +444,8 @@ fn request(method: &'static Method, path: String, redirect: bool, quarantine: bo
 	// Keep the logical path unchanged for caches and diagnostics. Reddit blocks
 	// literal anonymous comments routes, so the spoofed client rewrites those.
 	// A registered app is allowed to use the normal route.
-	let client = OAUTH_CLIENT.load_full();
-	let transport_path = request_transport_path(&path, client.official_api());
+	let official = crate::oauth::official_api_configured();
+	let transport_path = request_transport_path(&path, official);
 	let url = format!("{base_path}{transport_path}");
 
 	let mut headers: Vec<(String, String)> = vec![
@@ -395,14 +460,21 @@ fn request(method: &'static Method, path: String, redirect: bool, quarantine: bo
 		),
 	];
 
-	for (key, value) in client.headers_map.clone() {
-		headers.push((key, value));
+	if official {
+		let client = OAUTH_CLIENT.load_full();
+		for (key, value) in client.headers_map.clone() {
+			headers.push((key, value));
+		}
 	}
 
 	// shuffle headers: https://github.com/redlib-org/redlib/issues/324
 	fastrand::shuffle(&mut headers);
 
-	let mut builder = CLIENT.request(method.clone(), &url);
+	let mut builder = if official {
+		CLIENT.request(method.clone(), &url)
+	} else {
+		SHREDDIT_CLIENT.request(method.clone(), &url)
+	};
 
 	for (key, value) in headers {
 		builder = builder.header(key, value);
@@ -531,6 +603,16 @@ fn comments_logical_path(path: &str) -> String {
 /// Make a request to a Reddit API and parse the JSON response
 #[cached(size = 100, time = 30, result = true)]
 pub async fn json(path: String, quarantine: bool) -> Result<Value, String> {
+	// Reddit's anonymous OAuth API is blocked. Without a registered app,
+	// translate the routes Redlib needs from Reddit's logged-out web frontend.
+	// Routes that are not translated fail instead of falling back to the API.
+	if !crate::oauth::official_api_configured() {
+		return match crate::shreddit_api::json(path.clone()).await {
+			Some(result) => result,
+			None => Err(format!("This page is not available from Reddit's web frontend | {path}")),
+		};
+	}
+
 	// Closure to quickly build errors
 	let err = |msg: &str, e: String, path: String| -> Result<Value, String> {
 		// eprintln!("{} - {}: {}", url, msg, e);
@@ -666,6 +748,11 @@ async fn self_check(sub: &str) -> Result<(), String> {
 }
 
 pub async fn rate_limit_check() -> Result<(), String> {
+	if !crate::oauth::official_api_configured() {
+		info!("[ℹ️] Skipping rate limit check: using Reddit's web frontend");
+		return Ok(());
+	}
+
 	// The check assumes a new token gets a fresh quota, which only holds for the
 	// anonymous mobile client. Registered apps and the generic web fallback
 	// share their quota across tokens, so skip it.
