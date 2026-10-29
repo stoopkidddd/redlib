@@ -1,7 +1,8 @@
 name: GHCR container build
 
 # Builds redlib from source (Dockerfile.alpine) so the image contains this
-# fork's changes, then publishes a multi-arch image to ghcr.io/<owner>/<repo>.
+# fork's changes, then publishes a multi-arch image to ghcr.io/<owner>/<repo>-fork.
+# The -fork suffix avoids a stale ghcr.io/<owner>/redlib package this repo can't write to.
 
 on:
   push:
@@ -17,7 +18,7 @@ permissions:
   packages: write
 
 env:
-  REGISTRY_IMAGE: ghcr.io/${{ github.repository }}
+  REGISTRY_IMAGE: ghcr.io/${{ github.repository }}-fork
 
 jobs:
   build:
