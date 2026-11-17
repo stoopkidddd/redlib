@@ -8,6 +8,7 @@ pub mod oauth_resources;
 pub mod post;
 pub mod search;
 pub mod server;
+pub mod session;
 pub mod settings;
 pub mod shreddit;
 pub mod shreddit_api;

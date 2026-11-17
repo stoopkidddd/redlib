@@ -204,6 +204,8 @@ async fn main() {
 	if redlib::oauth::official_api_configured() {
 		info!("Creating OAUTH client.");
 		LazyLock::force(&OAUTH_CLIENT);
+	} else if redlib::session::configured() {
+		info!("Using the Reddit session from REDLIB_REDDIT_COOKIE; no OAuth client needed.");
 	} else {
 		info!("Using Reddit's web frontend; no OAuth client needed.");
 	}

@@ -455,6 +455,49 @@ impl OauthBackend for MobileSpoofAuth {
 	}
 }
 
+/// An API token minted for a logged-in Reddit session, with the headers of
+/// the device it was minted for. API requests send both.
+#[derive(Debug, Clone)]
+pub struct SessionToken {
+	pub token: String,
+	pub expires_in: u64,
+	pub headers: HashMap<String, String>,
+}
+
+/// Exchanges the session `cookie` (`reddit_session=...`) for an API token,
+/// the way Reddit's Android app does after a web login.
+pub(crate) async fn session_token(cookie: &str) -> Result<SessionToken, String> {
+	let device = Device::new();
+	let url = format!("{AUTH_ENDPOINT}/auth/v2/oauth/access-token/session");
+	let mut builder = CLIENT.post(&url).header("Cookie", cookie);
+	for (key, value) in &device.initial_headers {
+		builder = builder.header(key, value);
+	}
+	let auth = general_purpose::STANDARD.encode(format!("{}:", device.oauth_id));
+	builder = builder.header("Authorization", format!("Basic {auth}"));
+
+	let response = timeout(OAUTH_TIMEOUT, builder.json(&json!({ "scopes": ["*", "email", "pii"] })).send())
+		.await
+		.map_err(|_| "Reddit didn't answer the token request in time".to_owned())?
+		.map_err(|e| e.to_string())?;
+	let status = response.status();
+	let body = response.text().await.map_err(|e| e.to_string())?;
+	let json: serde_json::Value = serde_json::from_str(&body).map_err(|_| format!("status {status}, not JSON"))?;
+
+	let Some(token) = json["access_token"].as_str().filter(|token| !token.is_empty()) else {
+		// The answer may echo account details, so log only its keys.
+		let keys = json.as_object().map(|object| object.keys().cloned().collect::<Vec<_>>().join(", ")).unwrap_or_default();
+		return Err(format!("status {status}, no access_token (fields: {keys})"));
+	};
+	let expires_in = json["expires_in"].as_u64().unwrap_or(3600);
+
+	Ok(SessionToken {
+		token: token.to_owned(),
+		expires_in,
+		headers: device.headers,
+	})
+}
+
 // GenericWebAuth backend - simple web-based authentication
 #[derive(Debug, Clone)]
 pub struct GenericWebAuth {

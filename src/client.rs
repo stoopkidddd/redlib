@@ -606,7 +606,11 @@ pub async fn json(path: String, quarantine: bool) -> Result<Value, String> {
 	// Reddit's anonymous OAuth API is blocked. Without a registered app,
 	// translate the routes Redlib needs from Reddit's logged-out web frontend.
 	// Routes that are not translated fail instead of falling back to the API.
+	// With a session cookie, read Reddit's JSON as that logged-in account.
 	if !crate::oauth::official_api_configured() {
+		if crate::session::configured() {
+			return crate::session::json(&path, quarantine).await;
+		}
 		return match crate::shreddit_api::json(path.clone()).await {
 			Some(result) => result,
 			None => Err(format!("This page is not available from Reddit's web frontend | {path}")),
@@ -681,45 +685,14 @@ pub async fn json(path: String, quarantine: bool) -> Result<Value, String> {
 						Ok(value) => {
 							let json: Value = value;
 
-							// If user is suspended
-							if let Some(data) = json.get("data") {
-								if let Some(is_suspended) = data.get("is_suspended").and_then(Value::as_bool) {
-									if is_suspended {
-										return Err("suspended".into());
-									}
-								}
+							// OAuth token has expired; http status 401
+							if json["error"].is_i64() && json["message"] == "Unauthorized" {
+								error!("Forcing a token refresh");
+								let () = force_refresh_token().await;
+								return Err("OAuth token has expired. Please refresh the page!".to_string());
 							}
 
-							// If Reddit returned an error
-							if json["error"].is_i64() {
-								// OAuth token has expired; http status 401
-								if json["message"] == "Unauthorized" {
-									error!("Forcing a token refresh");
-									let () = force_refresh_token().await;
-									return Err("OAuth token has expired. Please refresh the page!".to_string());
-								}
-
-								// Handle quarantined
-								if json["reason"] == "quarantined" {
-									return Err("quarantined".into());
-								}
-								// Handle gated
-								if json["reason"] == "gated" {
-									return Err("gated".into());
-								}
-								// Handle private subs
-								if json["reason"] == "private" {
-									return Err("private".into());
-								}
-								// Handle banned subs
-								if json["reason"] == "banned" {
-									return Err("banned".into());
-								}
-
-								Err(format!("Reddit error {} \"{}\": {} | {path}", json["error"], json["reason"], json["message"]))
-							} else {
-								Ok(json)
-							}
+							reddit_json_value(json, &path)
 						}
 						Err(e) => {
 							error!("Got an invalid response from reddit {e}. Status code: {status}");
@@ -738,6 +711,22 @@ pub async fn json(path: String, quarantine: bool) -> Result<Value, String> {
 	}
 }
 
+/// Maps Reddit's JSON answer to a value, or to the errors the pages expect for
+/// suspended users and quarantined, gated, private or banned subreddits.
+pub(crate) fn reddit_json_value(json: Value, path: &str) -> Result<Value, String> {
+	if json["data"]["is_suspended"].as_bool() == Some(true) {
+		return Err("suspended".into());
+	}
+
+	if !json["error"].is_i64() {
+		return Ok(json);
+	}
+	match json["reason"].as_str() {
+		Some(reason @ ("quarantined" | "gated" | "private" | "banned")) => Err(reason.into()),
+		_ => Err(format!("Reddit error {} \"{}\": {} | {path}", json["error"], json["reason"], json["message"])),
+	}
+}
+
 async fn self_check(sub: &str) -> Result<(), String> {
 	let query = format!("/r/{sub}/hot.json?&raw_json=1");
 
@@ -749,7 +738,7 @@ async fn self_check(sub: &str) -> Result<(), String> {
 
 pub async fn rate_limit_check() -> Result<(), String> {
 	if !crate::oauth::official_api_configured() {
-		info!("[ℹ️] Skipping rate limit check: using Reddit's web frontend");
+		info!("[ℹ️] Skipping rate limit check: not using the anonymous OAuth client");
 		return Ok(());
 	}
 

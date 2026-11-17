@@ -405,6 +405,32 @@ and RSS.
 A few less common pages are not translated yet and return an error: wiki pages,
 duplicate-post lists and per-user comment listings.
 
+Since November 2026, Reddit blocks logged-out visitors from many networks with a
+"You've been blocked by network security" page. If that happens, use a Reddit
+session (below).
+
+### Reddit session cookie
+
+With `REDLIB_REDDIT_COOKIE` set, Redlib reads Reddit as a logged-in account.
+Every page works, including wiki pages, duplicates and user comments.
+
+1. Log in to <https://www.reddit.com> in your browser.
+2. Open the developer tools: **Application** (Chrome) or **Storage** (Firefox),
+   then **Cookies** › `https://www.reddit.com`.
+3. Copy the value of the `reddit_session` cookie.
+4. Set `REDLIB_REDDIT_COOKIE` to that value. `reddit_session=<value>` and a
+   whole `Cookie` header also work; Redlib keeps only `reddit_session`.
+
+Things to know:
+
+- Reddit sees every page the instance loads as that account's activity. Use
+  an account you don't mind connecting to that browsing.
+- Reddit can suspend accounts it thinks are automated.
+- The cookie stops working when you log out of that browser session, change
+  the password, or when Reddit expires it. The error page then says to
+  replace it.
+- Only one session is used. The official API settings below take precedence.
+
 ### Optional: official Reddit API
 
 If you have a registered Reddit app, Redlib will use the official API instead of
@@ -421,7 +447,10 @@ the web frontend. This is optional.
 
 An **installed app** also works: set only `REDLIB_REDDIT_CLIENT_ID` and leave
 `REDLIB_REDDIT_CLIENT_SECRET` empty. When `REDLIB_REDDIT_CLIENT_ID` is unset,
-Redlib stays on the web frontend.
+Redlib uses the session cookie if one is set, and otherwise the web frontend.
+
+Since November 2025, Reddit approves new API apps by hand, so a new app may not
+be usable.
 
 ## Command Line Flags
 
